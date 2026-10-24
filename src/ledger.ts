@@ -12,6 +12,7 @@
 // @ts-nocheck
 import { createHash } from "node:crypto"
 import { API, headersFor } from "./client.ts"
+import { sleep } from "./sleep.ts"
 
 // STEP_WAIT is how long a step's event is looked for: first after that long,
 // then every so often until the end (each ask given `ask` to answer).
@@ -117,10 +118,7 @@ export function owe(key, { since = Date.now(), n = 0, ready = Date.now(), carry 
 export async function usageEvents(tok, conv, since, want, { poll = false, first = STEP_WAIT.first, signal, before = () => Infinity, groups, abortFetch = false } = {}) {
   const key = usageKey(tok, conv)
   const end = Date.now() + STEP_WAIT.until
-  const wait = (ms) => new Promise((r) => {
-    const t = setTimeout(r, ms)
-    signal?.addEventListener("abort", () => (clearTimeout(t), r()), { once: true })
-  })
+  const wait = (ms) => sleep(ms, signal, "resolve")
   for (const [k, at] of claimed) if (Date.now() - at > 2 * STEP_WAIT.owedFor) claimed.delete(k)
   const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0)
   let usage = null
