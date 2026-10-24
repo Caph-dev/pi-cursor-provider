@@ -60,7 +60,7 @@ export function expiresAt(token: string): number {
   return Math.max(exp - 5 * 60 * 1000, Date.now() + 60 * 1000)
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error("Cursor sign-in cancelled"))
