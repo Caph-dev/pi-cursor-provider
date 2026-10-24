@@ -24,6 +24,7 @@ import { isDeepStrictEqual } from "node:util"
 import { EMPTY, failure, field, fields, frame, frames, pb, pbAny, pbNum, pbStr, pbValue, regional } from "./codec.ts"
 import { AGENT, API, CALL, GOOS, NAMESPACE, clientVersion, tempDir, unary } from "./client.ts"
 import { canRead, ledger, owe, STEP_WAIT, usageKey } from "./ledger.ts"
+import { recall, store, tokenKey } from "./cache.ts"
 import { request as resolveModel, usable } from "./models.ts"
 import { NATIVE_LIMITS, NativeSessionError, nativeFields, nativeMcpArgs, nativeSessions } from "./native-session.ts"
 
@@ -297,10 +298,15 @@ function buildRun(msgs, lastUser, tools, model, conv = "", { maxMode = false, pa
 // while it can't be had.
 
 const endpoints = new Map()
+const ENDPOINT_TTL = 10 * 60 * 1000
+const ENDPOINT_MISS_TTL = 60_000
+export function endpointCacheKeys() {
+  return [...endpoints.keys()]
+}
 export async function agentURL(tok, fresh, signal?: AbortSignal) {
-  const key = createHash("sha256").update(tok).digest("hex")
-  const had = endpoints.get(key)
-  if (!fresh && had && (had.listed || Date.now() - had.at < 60_000)) return had.url
+  const key = tokenKey(tok)
+  const had = recall(endpoints, key)
+  if (!fresh && had) return had.url
   let url = AGENT
   let listed = false
   try {
@@ -321,7 +327,7 @@ export async function agentURL(tok, fresh, signal?: AbortSignal) {
   if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
   // A refresh that learns nothing must not replace a regional URL with the global one.
   if (!listed && fresh && had?.url) return had.url
-  endpoints.set(key, { url, at: Date.now(), listed })
+  store(endpoints, key, { url, listed, expires: 0 }, listed ? ENDPOINT_TTL : ENDPOINT_MISS_TTL)
   return url
 }
 

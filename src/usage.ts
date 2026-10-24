@@ -9,11 +9,12 @@
  */
 import { STATUS_CODES } from "node:http"
 import { API, unary } from "./client.ts"
+import { tokenKey, recall, store } from "./cache.ts"
 
 export const WEBSITE = "https://cursor.com"
 
 const PLAN_TTL = 3600_000
-const plans = new Map<string, { plan: string; at: number }>()
+const plans = new Map<string, { plan: string; expires: number }>()
 
 function until(ms: number, signal?: AbortSignal): AbortSignal {
   const deadline = AbortSignal.timeout(ms)
@@ -179,18 +180,23 @@ async function periodUsage(tok: string, ids: string[], signal?: AbortSignal): Pr
 }
 
 async function planOf(tok: string, signal?: AbortSignal): Promise<string> {
-  const had = plans.get(tok)
-  if (had && Date.now() - had.at < PLAN_TTL) return had.plan
+  const key = tokenKey(tok)
+  const had = recall(plans, key)
+  if (had) return had.plan
   try {
     const body = await unary(API, "aiserver.v1.DashboardService/GetPlanInfo", tok, {}, 15_000, signal)
     if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
     const plan = String(body?.planInfo?.planName ?? "").trim()
-    if (plan) plans.set(tok, { plan, at: Date.now() })
-    return plan || had?.plan || ""
+    if (plan) store(plans, key, { plan, expires: 0 }, PLAN_TTL)
+    return plan
   } catch (err) {
     if (cancelled(signal, err)) throw err
-    return had?.plan ?? ""
+    return ""
   }
+}
+
+export function planCacheKeys(): string[] {
+  return [...plans.keys()]
 }
 
 async function botUsage(tok: string, signal?: AbortSignal): Promise<UsageWindow[]> {

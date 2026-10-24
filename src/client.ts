@@ -39,11 +39,12 @@ async function cursorExecutable() {
 }
 
 const VERSION_RE = /^\d{4}\.\d{2}\.\d{2}-[0-9a-f]+$/
-let versionSaid = ""
+const VERSION_TTL = 10 * 60 * 1000
+let versionCache = { value: "", expires: 0 }
 
 /** "cli-<installed cursor-agent version>", or the fallback the API still accepts. */
 export async function clientVersion() {
-  if (versionSaid) return versionSaid
+  if (versionCache.value && Date.now() < versionCache.expires) return versionCache.value
   let v = ""
   const exe = await cursorExecutable()
   if (exe) {
@@ -56,8 +57,8 @@ export async function clientVersion() {
     for (const dir of dirs)
       for (const n of await readdir(dir).catch(() => [])) if (VERSION_RE.test(n) && n > v) v = n
   }
-  versionSaid = "cli-" + (v || VERSION_FALLBACK)
-  return versionSaid
+  versionCache = { value: "cli-" + (v || VERSION_FALLBACK), expires: Date.now() + VERSION_TTL }
+  return versionCache.value
 }
 
 export async function headersFor(tok) {
