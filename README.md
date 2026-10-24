@@ -123,9 +123,10 @@ Compared with magpie [`packages/cursor`](https://github.com/magpie-community/plu
 npm install
 npm run check
 npm test
+CURSOR_E2E=1 npm run test:e2e
 ```
 
-`npm test` stays off the Cursor network (fetch is mocked where the dashboard is involved). `codec.ts`, `run.ts`, `models.ts`, `client.ts`, `ledger.ts`, and `native-session.ts` keep their `// @ts-nocheck` magpie-port headers.
+`npm test` stays off the Cursor network (fetch is mocked where the dashboard is involved). `npm run test:e2e` hits a real Cursor account (cursor-agent `auth.json`, `CURSOR_ACCESS_TOKEN`, or `/login cursor`) and never prints the token. `codec.ts`, `run.ts`, `models.ts`, `client.ts`, `ledger.ts`, and `native-session.ts` keep their `// @ts-nocheck` magpie-port headers.
 
 ## License
 

@@ -4,7 +4,12 @@
   "description": "Cursor provider for Pi: one HTTP/2 AgentService/Run per turn (magpie-aligned).",
   "license": "MIT",
   "type": "module",
-  "keywords": ["pi-package", "pi-extension", "cursor", "magpie"],
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "cursor",
+    "magpie"
+  ],
   "engines": {
     "node": ">=22"
   },
@@ -21,7 +26,8 @@
   },
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.ts",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "test:e2e": "CURSOR_E2E=1 node --experimental-strip-types --test test/e2e-live.ts"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
