@@ -9,7 +9,6 @@
 import { createHash } from "node:crypto"
 import type { RefreshModelsContext } from "@earendil-works/pi-ai"
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent"
-import { createHash } from "node:crypto"
 import { login, refresh, resolveAccessToken } from "./auth.ts"
 import { AGENT, clientVersion } from "./client.ts"
 import { piModelConfigs, usable } from "./models.ts"
