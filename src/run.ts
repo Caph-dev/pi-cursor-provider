@@ -310,6 +310,7 @@ export async function agentURL(tok, fresh, signal?: AbortSignal) {
   if (!fresh && had) return had.url
   let url = AGENT
   let listed = false
+  let error
   try {
     const cfg = await unary(API, "aiserver.v1.ServerConfigService/GetServerConfig", tok, {}, 10_000, signal)
     for (const raw of [cfg?.agentUrlConfig?.agentUrl, cfg?.agentUrlConfig?.agentnUrl]) {
@@ -324,10 +325,13 @@ export async function agentURL(tok, fresh, signal?: AbortSignal) {
     }
   } catch (e) {
     if (signal?.aborted) throw e
+    error = e
   }
   if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
   // A refresh that learns nothing must not replace a regional URL with the global one.
-  if (!listed && fresh && had?.url) return had.url
+  const kept = !listed && fresh && !!had?.url
+  trace?.note("endpoint", { url: kept ? had.url : url, listed, kept, error })
+  if (kept) return had.url
   store(endpoints, key, { url, listed, expires: 0 }, listed ? ENDPOINT_TTL : ENDPOINT_MISS_TTL)
   return url
 }

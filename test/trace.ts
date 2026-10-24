@@ -319,3 +319,26 @@ test("the doctor says when a failed Run's error body was cut short", async () =>
   assert.equal(ran.error?.status, 500)
   assert.match(turnLines(await doctor(), 1).join("\n"), /^ {4}failed \(500, .*\), error body cut short$/m)
 })
+
+test("the doctor shows which agent host GetServerConfig named, or why the turn used another", async () => {
+  journal()
+  let config = () => Response.json({ agentUrlConfig: { agentUrl: "https://agent-eu.example/v1/team-path" } })
+  mock.method(globalThis, "fetch", async (url: string | URL) =>
+    String(url).endsWith("GetServerConfig") ? config() : new Response("no", { status: 503 }))
+  await answer({ connect: await cursor(() => [text("done"), end()]), resolveAgentURL: undefined })
+  config = () => new Response("down", { status: 500 })
+  await answer({
+    resolveAgentURL: undefined,
+    connect: () => {
+      throw new Error("not in this region")
+    },
+  })
+  clearAgentCache()
+  config = () => Response.json({})
+  await answer({ connect: await cursor(() => [text("done"), end()]), resolveAgentURL: undefined })
+  const report = await doctor()
+  assert.equal(turnLines(report, 1)[1], "    endpoint: agent-eu.example, named by GetServerConfig")
+  assert.match(turnLines(report, 2).join("\n"), /^ {4}endpoint: kept agent-eu\.example \(.+\)$/m)
+  assert.equal(turnLines(report, 3)[1], "    endpoint: agentn.global.api5.cursor.sh, the global default (GetServerConfig named no agent host)")
+  assert.equal(report.includes("/team-path"), false)
+})
