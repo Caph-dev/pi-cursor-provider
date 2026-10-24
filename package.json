@@ -3,6 +3,14 @@
   "version": "0.3.0",
   "description": "Cursor provider for Pi: one HTTP/2 AgentService/Run per turn (magpie-aligned).",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Caph-dev/pi-cursor-provider.git"
+  },
+  "homepage": "https://github.com/Caph-dev/pi-cursor-provider#readme",
+  "bugs": {
+    "url": "https://github.com/Caph-dev/pi-cursor-provider/issues"
+  },
   "type": "module",
   "keywords": [
     "pi-package",
@@ -16,7 +24,8 @@
   "files": [
     "src",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "main": "./src/index.ts",
   "pi": {
@@ -27,7 +36,8 @@
   "scripts": {
     "test": "node --experimental-strip-types --test test/*.ts",
     "check": "tsc --noEmit",
-    "test:e2e": "CURSOR_E2E=1 node --experimental-strip-types --test test/e2e-live.ts"
+    "test:e2e": "CURSOR_E2E=1 node --experimental-strip-types --test test/e2e-live.ts",
+    "prepublishOnly": "npm run check && npm test"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",

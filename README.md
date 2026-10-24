@@ -59,6 +59,8 @@ The same report is exported from the package.
 import { fetchUsage, formatUsage, onDemandOf } from "pi-cursor-provider"
 ```
 
+Pi loads the package through `pi.extensions`, which points at `src/index.ts`. The import above also works under a TypeScript loader such as `tsx`, and under `node --experimental-strip-types` when the files are outside `node_modules`. Node does not strip types for files inside `node_modules`. A normal Node program that imports the installed package fails with `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`. `main` is the same TypeScript file Pi loads. It is not a compiled JavaScript entry.
+
 `fetchUsage(token, modelIds)` returns `{ plan?, windows, error? }`. `formatUsage` turns that into the text the command shows. `onDemandOf` reads a period payload and a hard-limit payload into `fixed`, `unlimited`, `disabled`, or `unavailable`.
 
 Windows follow magpie, in this order.
