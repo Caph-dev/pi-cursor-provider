@@ -261,3 +261,15 @@ test("the doctor shows a native Run created, or declined with prepare's reason",
   assert.deepEqual(turnLines(report, 1).slice(1), ["    native: created", "    run: h2 to a.example"])
   assert.deepEqual(turnLines(report, 2).slice(1), ["    native: declined, historical native calls", "    run: h2 to a.example"])
 })
+
+test("the doctor shows why a native owner ended, which fail() forgets", async () => {
+  journal()
+  const connect = await cursor(() => [end(JSON.stringify({ error: { code: "unavailable", message: "overloaded" } }))])
+  const ran = await answer({ connect })
+  assert.equal(ran.error?.message, "overloaded")
+  assert.deepEqual(turnLines(await doctor(), 1).slice(1), [
+    "    native: created",
+    "    run: h2 to a.example",
+    "    owner ended: failed, composer-test (overloaded)",
+  ])
+})

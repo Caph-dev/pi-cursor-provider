@@ -561,6 +561,7 @@ class NativeSession {
     if (this.error || this.state === "complete") return
     this.error = error
     this.state = state
+    this.wire.trace?.note("owner-ended", { state, model: this.resolution?.id, error })
     this.segment.fail(error)
     for (const segment of this.batches ?? []) segment.detach?.()
     this.segment.detach?.()
