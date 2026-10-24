@@ -4,7 +4,6 @@
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  */
-// @ts-nocheck
 import { basename, dirname, join } from "node:path"
 import { homedir, platform, tmpdir } from "node:os"
 import { readdir, realpath, stat } from "node:fs/promises"
@@ -17,10 +16,10 @@ export const CALL = "CallDynamicTool"
 export const NAMESPACE = "pi"
 export const DEFAULT_CONTEXT = 200_000
 export const MODELS_KEEP = 10 * 60 * 1000
-export const GOOS = { win32: "windows" }[platform()] ?? platform()
+export const GOOS = platform() === "win32" ? "windows" : platform()
 export const tempDir = tmpdir
 
-const exists = (p) => stat(p).then((s) => !s.isDirectory(), () => false)
+const exists = (p: string) => stat(p).then((s) => !s.isDirectory(), () => false)
 
 async function cursorExecutable() {
   const dirs = (process.env.PATH ?? "").split(GOOS === "windows" ? ";" : ":").filter(Boolean)
@@ -61,7 +60,7 @@ export async function clientVersion() {
   return versionCache.value
 }
 
-export async function headersFor(tok) {
+export async function headersFor(tok: string) {
   return {
     "Content-Type": "application/json",
     "Connect-Protocol-Version": "1",
@@ -73,7 +72,7 @@ export async function headersFor(tok) {
 }
 
 /** Connect unary call in JSON. `signal` aborts the request. `timeout` still does. */
-export async function unary(base, path, tok, body = {}, timeout = 15_000, signal?: AbortSignal) {
+export async function unary(base: string, path: string, tok: string, body: unknown = {}, timeout = 15_000, signal?: AbortSignal) {
   const deadline = AbortSignal.timeout(timeout)
   const res = await fetch(base + "/" + path, {
     method: "POST",
@@ -84,9 +83,7 @@ export async function unary(base, path, tok, body = {}, timeout = 15_000, signal
   const text = await res.text()
   if (!res.ok) {
     const f = failure(res.status, text)
-    const e = new Error(f.message)
-    e.status = f.status
-    throw e
+    throw Object.assign(new Error(f.message), { status: f.status })
   }
   return JSON.parse(text || "{}")
 }
