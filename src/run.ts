@@ -330,9 +330,9 @@ export function clearAgentCache() {
 // connection that failed (refused, no network) or a stream the server
 // refused leaves the next Run to try HTTP/2 again.
 //
-// Tests may inject `connect`; that path stays HTTP/2-only with headerWaitMs.
+// Tests may inject `connect`; that path stays HTTP/2-only. Both paths wait
+// headerWaitMs for response headers. The default is H2.wait.
 let h1Until = 0
-const HEADER_WAIT_MS = 30_000
 const H2 = {
   wait: 15_000,
   retryAfter: 10 * 60_000,
@@ -508,14 +508,14 @@ function openH1(headers, signal) {
   return Promise.resolve(signal?.aborted ? cancelledOpen() : { session: { close, destroy: close }, req: Object.assign(req, { close }), status: 200, h1: true, headers: {} })
 }
 
-async function open(base, headers, signal, connect = defaultConnect, headerWaitMs = HEADER_WAIT_MS) {
+async function open(base, headers, signal, connect = defaultConnect, headerWaitMs = H2.wait) {
   if (signal?.aborted) return cancelledOpen()
   // Injected connect (tests): HTTP/2 only, keep the caller's header wait.
   if (connect !== defaultConnect) {
     return openH2(base, headers, signal, connect, headerWaitMs)
   }
   if (Date.now() >= h1Until) {
-    const o = await openH2(base, headers, signal, defaultConnect, H2.wait)
+    const o = await openH2(base, headers, signal, defaultConnect, headerWaitMs)
     if (signal?.aborted) {
       try { o.req?.close?.(http2.constants.NGHTTP2_CANCEL) } catch {}
       try { o.session?.destroy?.() } catch {}
@@ -1166,7 +1166,7 @@ export async function runAnswer({
   onResponse,
   onPayload,
   headers,
-  headerWaitMs = HEADER_WAIT_MS,
+  headerWaitMs = H2.wait,
   toolIdleMs = TOOL_IDLE_MS,
 }: {
   tok: string
