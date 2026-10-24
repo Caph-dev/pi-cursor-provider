@@ -5,17 +5,21 @@
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  * which itself was ported from magpie's Go client (internal/provider/cursor*.go).
  *
- * Not ported: parked HTTP/2 sessions, checkpoint resume, run journals, and the
- * OpenCode chat-completions adapter (errorResponse / kept / owed usage).
- * A tool call ends this Run. Pi executes the tool and sends the result on the
- * next request's history. Nothing writes a tool result back to this stream.
+ * Not ported: parked HTTP/2 sessions, checkpoint resume, run journals, the
+ * deferred usage ledger, and the OpenCode chat-completions adapter.
+ * The stateless path still ends the Run when tools are returned. Pi executes
+ * them and the next request carries the results as history.
+ * The native path keeps that HTTP/2 Run open. A later turn whose tool results
+ * use matching call_cursor_<hex>_<seg>_<i> ids writes those results back to it.
  */
 // @ts-nocheck
 import { createHash, randomBytes, randomUUID } from "node:crypto"
 import http2 from "node:http2"
+import { isDeepStrictEqual } from "node:util"
 import { EMPTY, failure, field, fields, frame, frames, pb, pbAny, pbNum, pbStr, pbValue, regional } from "./codec.ts"
 import { AGENT, API, CALL, GOOS, NAMESPACE, clientVersion, tempDir, unary } from "./client.ts"
 import { request as resolveModel, usable } from "./models.ts"
+import { NATIVE_LIMITS, NativeSessionError, nativeFields, nativeMcpArgs, nativeSessions } from "./native-session.ts"
 
 const NO_RESULT = "Tool use was interrupted and did not produce a result."
 
@@ -104,14 +108,16 @@ function result(id, text, isError) {
 // answers a call of the reply before it; a call left unanswered is
 // answered for, as the API wants every call to have its result. With it,
 // the user's last words.
-function conversation(chat, tools) {
+export function conversation(chat, tools) {
   const out = []
+  let size = 0
   const add = (m) => out.push(Buffer.from(JSON.stringify(m)))
   const system = []
   let last = "."
   for (const m of chat.messages ?? [])
     if (m.role === "system" || m.role === "developer") system.push(textOf(m.content))
   const sys = system.filter(Boolean).join("\n\n") + catalog(tools)
+  size += sys.length
   if (sys) add({ role: "system", content: sys })
   let pending = []
   let results = []
@@ -129,6 +135,7 @@ function conversation(chat, tools) {
       if (i >= 0) {
         pending.splice(i, 1)
         const text = textOf(m.content)
+        size += text.length
         results.push(result(id, text, false))
       }
       continue
@@ -138,9 +145,11 @@ function conversation(chat, tools) {
       const content = []
       const text = textOf(m.content)
       if (text) content.push({ type: "text", text })
+      size += text.length
       for (const c of m.tool_calls ?? []) {
         if (c?.type && c.type !== "function") continue
         const args = parseArgs(c.function?.arguments)
+        size += (c.function?.arguments ?? "").length + (c.function?.name ?? "").length
         content.push({ type: "tool-call", toolCallId: callID(c.id), toolName: CALL, args: { namespace: NAMESPACE, toolName: c.function?.name, arguments: args } })
         pending.push(c.id)
       }
@@ -154,6 +163,7 @@ function conversation(chat, tools) {
     for (const p of parts) {
       if (p?.type === "text" && p.text) {
         content.push({ type: "text", text: p.text })
+        size += p.text.length
         first ||= p.text
       } else if (p?.type === "image_url") {
         const u = typeof p.image_url === "string" ? p.image_url : p.image_url?.url ?? ""
@@ -169,7 +179,8 @@ function conversation(chat, tools) {
     if (content.length) add({ role: "user", content })
   }
   answer()
-  return { msgs: out, last }
+  for (const t of tools) size += t.name.length + t.description.length + t.schemaText.length
+  return { msgs: out, last, estimate: Math.floor(size / 4) }
 }
 
 // ---- the request ---------------------------------------------------------------------
@@ -220,7 +231,7 @@ export function conversationID(chat, session) {
 // own client has it (it takes both out to get the prompt's uncached
 // rest); input is that rest, the cache added back for prompt_tokens. Its
 // reasoning_tokens is kept as reasoning.
-function usageOf(uf) {
+export function usageOf(uf) {
   const [inp, cr, cw] = [pbNum(uf, 1), pbNum(uf, 3), pbNum(uf, 4)]
   return { input: Math.max(inp - cr - cw, 0), output: pbNum(uf, 2), cacheRead: cr, cacheWrite: cw, reasoning: pbNum(uf, 5) }
 }
@@ -385,7 +396,8 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
     }
   }
   const settled = () => {
-    // Tools are full: cancel this Run. Their results ride the next request.
+    // Stateless path only. Tools are full, so cancel this Run. Their results ride the next request.
+    // A native Run does not use this decoder, and it leaves the stream open.
     if (calls > 0) close?.()
     return finish()
   }
@@ -512,18 +524,50 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
 // exec answers what the server asks the client to run: a call of the
 // caller's tools is returned, the list of them is given, and anything else
 // is refused.
-function exec(msg, tools, send, closeExec) {
-  const es = fields(msg)
+const NAMESPACES = [NAMESPACE]
+const bareName = (s) => {
+  for (const ns of NAMESPACES) if (s.startsWith(ns + "-")) return s.slice(ns.length + 1)
+  return s
+}
+
+function exec(msg, tools, send, closeExec, refused, native = false) {
+  const es = native ? nativeFields(msg) : fields(msg)
+  if (native && es.some((e) => e.num === 1 && (e.wire !== 0 || !Number.isInteger(e.n) || e.n < 0 || e.n > 0xffffffff)))
+    throw new NativeSessionError(502, "invalid native exec request ID")
   const id = pbNum(es, 1)
   const execID = pbStr(es, 15)
+  let nativeCall, nativeUnavailable = false
+  if (native) for (const e of es) if (e.num === 11) {
+    if (e.wire !== 2) throw new NativeSessionError(502, "invalid native MCP argument envelope")
+    const { fields: a, args } = nativeMcpArgs(e.data)
+    const name = pbStr(a, 5) || bareName(pbStr(a, 1))
+    const provider = pbStr(a, 4)
+    const server = pbStr(a, 9)
+    if (provider && !NAMESPACES.includes(provider) || server && !NAMESPACES.includes(server)) nativeUnavailable = true
+    if (pbNum(a, 7) || field(a, 6)) nativeUnavailable = true
+    if (!tools.some((t) => t.name === name)) nativeUnavailable = true
+    if (!pbStr(a, 5) && !NAMESPACES.some((ns) => pbStr(a, 1) === ns + "-" + name)) nativeUnavailable = true
+    const call = { requestID: id, execID, nativeID: pbStr(a, 3), name, args }
+    if (nativeCall && !isDeepStrictEqual(nativeCall, call)) throw new NativeSessionError(502, "ambiguous repeated native MCP argument envelopes")
+    nativeCall ??= call
+  }
   const answer = (num, res) => {
     send(pb().bytes(2, pb().varint(1, id).str(15, execID).bytes(num, res)).done())
     closeExec(id)
   }
+  const unavailable = () => {
+    const kind = es.find((e) => ![1, 15, 19, 55].includes(e.num))?.num ?? 0
+    refused?.set(kind, (refused.get(kind) ?? 0) + 1)
+    send(pb().bytes(5, pb().bytes(2, pb().varint(1, id).str(2, "not available"))).done())
+    closeExec(id)
+    return null
+  }
+  if (nativeUnavailable) return unavailable()
   for (const e of es) {
     switch (e.num) {
       case 11: {
         // mcp_args: a call of the caller's tools
+        if (native) return { ...nativeCall, args: JSON.stringify(nativeCall.args) }
         const a = fields(e.data)
         const args = {}
         for (const kv of a) {
@@ -556,9 +600,7 @@ function exec(msg, tools, send, closeExec) {
     }
   }
   // a shell, a file read or an edit of Cursor's own: never run
-  send(pb().bytes(5, pb().bytes(2, pb().varint(1, id).str(2, "not available"))).done())
-  closeExec(id)
-  return null
+  return unavailable()
 }
 
 const maxOnly = new Set()
@@ -660,9 +702,213 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   }
 }
 
+// withDelivery marks the sealed segment clean once the caller has its stop
+// event. The next turn can then resume. Until then prepare reports the owner busy.
+function withDelivery(owner, events) {
+  const it = events[Symbol.asyncIterator]()
+  return {
+    async next() {
+      const r = await it.next()
+      if (r.value?.stop) owner.delivered()
+      return r
+    },
+    return: () => it.return?.(),
+    [Symbol.asyncIterator]() { return this },
+  }
+}
+
+// nativeTransport queues writes on one open Run. Heartbeats and exec answers
+// never wait. A KV reply waits until the queue has room.
+function nativeTransport(req, close, fail, limits = NATIVE_LIMITS) {
+  const outbound = { bytes: 0, messages: 0 }
+  const queue = []
+  let closed = false, flushing = false, rejectWrite
+  const waiters = new Set()
+  const spare = (n) => Math.floor(n / 8)
+  const fits = (size) => outbound.messages === 0 || (outbound.messages + 1 + spare(limits.outboundMessages) <= limits.outboundMessages
+    && outbound.bytes + size + spare(limits.outboundBytes) <= limits.outboundBytes)
+  const wake = () => {
+    for (const w of waiters) if (closed || fits(w.size)) w.done()
+  }
+  const flush = async () => {
+    if (closed || flushing) return
+    flushing = true
+    try {
+      while (!closed && queue.length) {
+        const packet = queue.shift()
+        await new Promise((resolve, reject) => {
+          let written = false, drained = false, started = false, settled = false
+          const finish = (error) => {
+            if (settled) return
+            settled = true
+            rejectWrite = undefined
+            req.removeListener("drain", drain)
+            req.removeListener("error", failed)
+            req.removeListener("close", lost)
+            error ? reject(error) : resolve()
+          }
+          const check = () => { if (started && written && drained) finish() }
+          const drain = () => { drained = true; check() }
+          const failed = (e) => finish(e)
+          const lost = () => finish(new NativeSessionError(502, "native transport closed during a write; its outcome is uncertain"))
+          rejectWrite = finish
+          req.once("drain", drain)
+          req.once("error", failed)
+          req.once("close", lost)
+          try {
+            drained = req.write(packet, (e) => {
+              if (e) return finish(e)
+              written = true
+              check()
+            }) || drained
+            started = true
+            if (drained) req.removeListener("drain", drain)
+            check()
+          } catch (e) { finish(e) }
+        })
+        if (!closed) { outbound.bytes -= packet.length; outbound.messages--; wake() }
+      }
+    } catch (e) {
+      if (!closed) fail(e)
+    } finally { flushing = false }
+  }
+  return {
+    outbound,
+    send(message) {
+      if (closed || req.destroyed || !req.writable) throw new NativeSessionError(502, "native transport is no longer writable")
+      const size = message.length + 5
+      if (outbound.bytes + size > limits.outboundBytes) throw new NativeSessionError(503, "native outbound bytes limit reached")
+      if (outbound.messages + 1 > limits.outboundMessages) throw new NativeSessionError(503, "native outbound messages limit reached")
+      outbound.bytes += size
+      outbound.messages++
+      queue.push(frame(message))
+      void flush()
+    },
+    room(size) {
+      if (closed || fits(size)) return Promise.resolve()
+      return new Promise((resolve, reject) => {
+        const w = {
+          size,
+          done() {
+            waiters.delete(w)
+            clearTimeout(w.timer)
+            resolve()
+          },
+        }
+        w.timer = setTimeout(() => {
+          waiters.delete(w)
+          const which = outbound.bytes + size + spare(limits.outboundBytes) > limits.outboundBytes ? "bytes" : "messages"
+          reject(new NativeSessionError(503, `native outbound ${which} limit reached: the queue did not drain for ${Math.round(limits.writeWait / 1000)}s`))
+        }, limits.writeWait)
+        w.timer.unref?.()
+        waiters.add(w)
+      })
+    },
+    close() {
+      if (closed) return
+      closed = true
+      queue.length = 0
+      outbound.bytes = 0
+      outbound.messages = 0
+      wake()
+      rejectWrite?.(new NativeSessionError(410, "native transport was cancelled"))
+      close()
+    },
+  }
+}
+
+// runNative keeps the Run open across tool batches. Accounting is a no-op.
+// The deferred dashboard ledger is not ported. TurnEnded usage is what a
+// finished Run reports.
+async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, params, native, connect, onResponse, onPayload, headers, headerWaitMs }) {
+  const cid = convID || randomUUID()
+  native.accounting = { started() {}, async settle() { return null }, delivered() {}, abandon() {} }
+  let modelId = id
+  if (onPayload) {
+    const replaced = await onPayload({ model: modelId, maxMode: !!maxMode, params, conversationId: cid, tools: tools.map((t) => t.name) })
+    if (replaced && typeof replaced === "object" && !Buffer.isBuffer(replaced) && typeof replaced.model === "string" && replaced.model) {
+      modelId = replaced.model
+    }
+  }
+  const { first, blobs } = buildRun(conv.msgs, conv.last, tools, modelId, cid, { maxMode, params })
+  native.chatTools = tools
+  native.attach(signal)
+  if (native.error) {
+    nativeSessions.forget(native)
+    return { error: native.error }
+  }
+  const o = await open(base, cursorHeaders(tok, await clientVersion(), headers), native.ac.signal, connect, headerWaitMs)
+  if (o.error) {
+    native.fail(o.error)
+    nativeSessions.forget(native)
+    return o
+  }
+  if (onResponse) await onResponse({ status: o.status, headers: o.headers ?? {} })
+  const { session, req } = o
+  const close = () => {
+    try { req.close(http2.constants.NGHTTP2_CANCEL) } catch {}
+    try { session.close() } catch {}
+    try { session.destroy() } catch {}
+  }
+  const transport = nativeTransport(req, close, (e) => native.fail({ status: e.status ?? 502, message: e.message }), native.limits)
+  try {
+    native.bind(transport, blobs, conv.estimate)
+    if (native.error) {
+      nativeSessions.forget(native)
+      return { error: native.error }
+    }
+    native.send(first)
+    native.accounting.started()
+    if (o.status < 200 || o.status > 299) {
+      const chunks = []
+      for await (const c of req) chunks.push(c)
+      native.fail(failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)))
+      nativeSessions.forget(native)
+      return { error: native.error }
+    }
+    native.pumpTask = (async () => {
+      await native.pump(frames(req))
+    })()
+    const response = native.response()
+    const it = response.events
+    const head = await it.next()
+    if (head.done || head.value.error) {
+      const error = head.value?.error ?? { status: 502, message: "an empty reply" }
+      await native.cancel(error.message)
+      nativeSessions.forget(native)
+      return { error }
+    }
+    let firstEvent = head
+    const events = {
+      next() {
+        if (firstEvent) {
+          const r = firstEvent
+          firstEvent = null
+          if (r.value?.stop) native.delivered()
+          return Promise.resolve(r)
+        }
+        return it.next().then((r) => {
+          if (r.value?.stop) native.delivered()
+          return r
+        })
+      },
+      return: () => it.return(),
+      [Symbol.asyncIterator]() { return this },
+    }
+    return { conversationId: cid, events }
+  } catch (e) {
+    native.fail({ status: e.status ?? 502, message: e.message })
+    await native.pumpTask
+    nativeSessions.forget(native)
+    return { error: native.error }
+  }
+}
+
 export function clearMaxOnly() {
   maxOnly.clear()
 }
+
+export { nativeSessions } from "./native-session.ts"
 
 /** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
 export async function runAnswer({
@@ -730,6 +976,18 @@ export async function runAnswer({
       },
     })),
   }
+  const listed = toolsOf(chat)
+  const convID = conversationID(chat, sessionOf({ sessionID: session }))
+  const prepared = nativeSessions.prepare(tok, chat, convID, listed)
+  if (prepared.owner) {
+    try {
+      const conv = conversation(chat, listed)
+      const resumed = prepared.owner.resume({ ...prepared, estimate: conv.estimate }, signal)
+      return { conversationId: convID, events: withDelivery(prepared.owner, resumed.events) }
+    } catch (e) {
+      return { error: { status: e?.status ?? 502, message: e?.message ?? String(e) } }
+    }
+  }
   let raw = rawModels
   if (raw === undefined) {
     try {
@@ -742,11 +1000,15 @@ export async function runAnswer({
   let id = resolved.id
   let params = resolved.params
   let maxMode = resolved.maxMode || maxOnly.has(id)
-  const listed = toolsOf(chat)
   const conv = conversation(chat, listed)
-  const convID = conversationID(chat, sessionOf({ sessionID: session }))
   let base = await resolveAgentURL(tok, false)
-  const once = () => runOnce({ tok, base, id, tools: listed, conv, convID, signal, maxMode, params, connect, onResponse, onPayload, headers, headerWaitMs, toolIdleMs })
+  const once = async () => {
+    const native = prepared.fallback ? null : nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure })
+    const args = { tok, base, id, tools: listed, conv, convID, signal, maxMode, params, connect, onResponse, onPayload, headers, headerWaitMs, toolIdleMs }
+    let response = native ? await runNative({ ...args, native }) : await runOnce(args)
+    if (response.error?.retentionIneligible && !signal?.aborted) response = await runOnce(args)
+    return response
+  }
   let ran = await once()
   if (ran.error && regional(ran.error.message)) {
     const fresh = await resolveAgentURL(tok, true)

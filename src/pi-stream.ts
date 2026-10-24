@@ -1,8 +1,11 @@
 /**
  * Cursor Run events as a Pi assistant stream.
  *
- * Tool calls stop the Run. Pi executes them and the next request carries the
- * results. This file does not write a tool result back to the open stream.
+ * Tool calls on the stateless path stop the Run. Pi executes them and the next
+ * request carries the results as history.
+ * A same-process native Run stays open. The next turn writes matching
+ * call_cursor_<hex>_<seg>_<i> results back to that stream. This file only
+ * maps events. It does not write the tool result itself.
  */
 import {
   calculateCost,
@@ -123,7 +126,12 @@ function toChat(messages: TranscriptContext["messages"], system: string) {
     }
     if (message.role === "toolResult") {
       const text = message.content.map((part) => (part.type === "text" ? part.text : "[image]")).join("")
-      out.push({ role: "tool", tool_call_id: message.toolCallId, content: text })
+      out.push({
+        role: "tool",
+        tool_call_id: message.toolCallId,
+        content: text,
+        ...(message.isError ? { isError: true } : {}),
+      })
     }
   }
   return out
