@@ -27,7 +27,7 @@ import { canRead, ledger, owe, STEP_WAIT, usageKey } from "./ledger.ts"
 import { recall, store, tokenKey } from "./cache.ts"
 import { request as resolveModel, usable } from "./models.ts"
 import { NATIVE_LIMITS, NativeSessionError, nativeFields, nativeMcpArgs, nativeSessions } from "./native-session.ts"
-import { hostOf, type Account, type Host } from "./trace.ts"
+import { hostOf, trace, type Account, type Host } from "./trace.ts"
 
 const NO_RESULT = "Tool use was interrupted and did not produce a result."
 
@@ -526,7 +526,9 @@ async function open(base, headers, signal, connect = defaultConnect, headerWaitM
   if (signal?.aborted) return cancelledOpen()
   // Injected connect (tests): HTTP/2 only, keep the caller's header wait.
   if (connect !== defaultConnect) {
-    return openH2(base, headers, signal, connect, headerWaitMs)
+    const o = await openH2(base, headers, signal, connect, headerWaitMs)
+    if (!o.error) trace?.note("transport", { url: base, h1: false })
+    return o
   }
   if (Date.now() >= h1Until) {
     const o = await openH2(base, headers, signal, defaultConnect, headerWaitMs)
@@ -535,9 +537,13 @@ async function open(base, headers, signal, connect = defaultConnect, headerWaitM
       try { o.session?.destroy?.() } catch {}
       return cancelledOpen()
     }
-    if (!o.h2Failed) return o
+    if (!o.h2Failed) {
+      trace?.note("transport", { url: base, h1: false })
+      return o
+    }
     if (o.blocked) h1Until = Date.now() + H2.retryAfter
-  }
+    trace?.note("transport", { url: API, h1: true, h2: { url: base, error: o.error }, until: o.blocked ? h1Until : undefined })
+  } else trace?.note("transport", { url: API, h1: true, until: h1Until })
   if (signal?.aborted) return cancelledOpen()
   return openH1(headers, signal)
 }
@@ -1191,25 +1197,7 @@ export function clearMaxOnly() {
 export { nativeSessions } from "./native-session.ts"
 export { STEP_WAIT, ledger, owed, misses, unreadable, clearLedger, usageKey } from "./ledger.ts"
 
-/** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
-export async function runAnswer({
-  tok,
-  model,
-  effort = "",
-  fast,
-  messages,
-  tools = [],
-  session = "",
-  signal,
-  connect,
-  resolveAgentURL = agentURL,
-  rawModels,
-  onResponse,
-  onPayload,
-  headers,
-  headerWaitMs = H2.wait,
-  toolIdleMs = TOOL_IDLE_MS,
-}: {
+export type RunAnswerOptions = {
   tok: string
   model?: string
   effort?: string
@@ -1226,7 +1214,9 @@ export async function runAnswer({
   headers?: Record<string, string | null | undefined>
   headerWaitMs?: number
   toolIdleMs?: number
-}): Promise<{
+}
+
+export type RunAnswerResult = {
   error?: { status?: number; message?: string }
   conversationId?: string
   events?: AsyncIterable<{
@@ -1242,7 +1232,36 @@ export async function runAnswer({
     }
     error?: { status?: number; message?: string }
   }>
-}> {
+}
+
+/** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
+export async function runAnswer(opts: RunAnswerOptions): Promise<RunAnswerResult> {
+  const t = trace
+  if (!t) return answer(opts)
+  return t.within({ token: opts.tok, model: opts.model }, async () => {
+    const ran = await answer(opts)
+    return ran.events ? { ...ran, events: t.carry(ran.events) } : ran
+  })
+}
+
+async function answer({
+  tok,
+  model,
+  effort = "",
+  fast,
+  messages,
+  tools = [],
+  session = "",
+  signal,
+  connect,
+  resolveAgentURL = agentURL,
+  rawModels,
+  onResponse,
+  onPayload,
+  headers,
+  headerWaitMs = H2.wait,
+  toolIdleMs = TOOL_IDLE_MS,
+}: RunAnswerOptions): Promise<RunAnswerResult> {
   const chat = {
     model,
     messages,
