@@ -1253,15 +1253,17 @@ export async function runAnswer({
     return response
   }
   let ran = await once()
+  if (signal?.aborted) return ran
   if (ran.error && regional(ran.error.message)) {
     resetH1()
     const fresh = await resolveAgentURL(tok, true, signal)
     const viaH1 = !!ran.h1
-    if (fresh !== base || viaH1) {
+    if ((fresh !== base || viaH1) && !signal?.aborted) {
       base = fresh
       ran = await once()
     }
   }
+  if (signal?.aborted) return ran
   if (ran.error && !maxMode && maxRequired(ran.error.message)) {
     maxMode = true
     maxOnly.add(id)
