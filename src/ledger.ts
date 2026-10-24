@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto"
 import { API, headersFor } from "./client.ts"
 import { sleep } from "./sleep.ts"
-import type { Account } from "./trace.ts"
+import { trace, type Account } from "./trace.ts"
 
 // STEP_WAIT is how long a step's event is looked for: first after that long,
 // then every so often until the end (each ask given `ask` to answer).
@@ -182,8 +182,10 @@ export async function usageEvents(tok, conv, since, want, { poll = false, first 
       })
       if (res.status >= 400 && res.status < 500 && res.status !== 429) {
         unreadable.set(tokKey(tok), Date.now())
+        trace?.note("usage", { status: res.status, refused: true })
         return { usage, events, got, counts, refused: true }
       }
+      if (!res.ok) trace?.note("usage", { status: res.status })
       const evs = res.ok ? ((await res.json())?.usageEventsDisplay ?? []) : []
       const found = evs
         .filter((e) => e?.conversationId === conv && e.tokenUsage && num(e.timestamp) >= since - 1000 && !claimed.has(key + "\0" + e.timestamp))
@@ -203,7 +205,9 @@ export async function usageEvents(tok, conv, since, want, { poll = false, first 
         got++
       }
       if (got >= want) break
-    } catch {}
+    } catch (e) {
+      if (!signal?.aborted) trace?.note("usage", { error: e })
+    }
     if (!poll || Date.now() + STEP_WAIT.every > end) break
     await wait(STEP_WAIT.every)
   }
@@ -226,7 +230,10 @@ function collect(tok, conv, { poll = false, first, signal, over = () => false, a
     let r = { usage: null, events: [], got: 0 }
     if (want > 0 && canRead(tok)) r = await usageEvents(tok, conv, Math.min(...groups.map((g) => g.since)), want, {
       poll, first, signal, abortFetch, before: () => d.before ?? Infinity, ...(d.groups ? { groups } : {}),
-    }).catch(() => r)
+    }).catch((e) => {
+      trace?.note("usage", { error: e })
+      return r
+    })
     let short = false
     for (const [i, g] of groups.entries()) {
       const remaining = g.n - (d.groups ? r.counts?.[i] ?? 0 : r.got)
@@ -294,7 +301,12 @@ export function ledger(tok, conv, since, signal, kept, { before } = {}) {
       const m = misses.get(key) ?? 0
       const waits = stepsWait(m)
       if (!kept) {
-        const r = waits ? await usageEvents(tok, conv, since, 1, { poll: true, signal }).catch(() => ({})) : {}
+        const r = waits
+          ? await usageEvents(tok, conv, since, 1, { poll: true, signal }).catch((e) => {
+              trace?.note("usage", { error: e })
+              return {}
+            })
+          : {}
         if (r.usage) misses.delete(key)
         else if (!r.refused) misses.set(key, m + 1)
         return r.usage ?? null

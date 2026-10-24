@@ -9,13 +9,14 @@ import { inspect } from "node:util"
 import { tokenKey } from "../src/cache.ts"
 import { frame, pb } from "../src/codec.ts"
 import { registerCursorDoctor } from "../src/doctor.ts"
-import { clearLedger } from "../src/ledger.ts"
+import { STEP_WAIT, clearLedger } from "../src/ledger.ts"
 import { clearAgentCache, clearMaxOnly, nativeSessions, resetH1, runAnswer, type RunAnswerOptions } from "../src/run.ts"
 import { Account, trace, traceForTests, type Trace } from "../src/trace.ts"
 
 const TOKEN = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0cmFjZSJ9.c2lnbmF0dXJlLXRyYWNlLXRlc3Q"
 const OTHER = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJvdGhlciJ9.c2lnbmF0dXJlLW90aGVyLXRlc3Q"
 const saved = { token: process.env.CURSOR_ACCESS_TOKEN, dir: process.env.PI_CODING_AGENT_DIR }
+const wait = { ...STEP_WAIT }
 const servers: (() => Promise<void>)[] = []
 
 before(() => {
@@ -33,6 +34,7 @@ after(() => {
 afterEach(async () => {
   traceForTests(false)
   mock.restoreAll()
+  Object.assign(STEP_WAIT, wait)
   for (const close of servers.splice(0)) await close()
   await nativeSessions.clear()
   resetH1()
@@ -341,4 +343,30 @@ test("the doctor shows which agent host GetServerConfig named, or why the turn u
   assert.match(turnLines(report, 2).join("\n"), /^ {4}endpoint: kept agent-eu\.example \(.+\)$/m)
   assert.equal(turnLines(report, 3)[1], "    endpoint: agentn.global.api5.cursor.sh, the global default (GetServerConfig named no agent host)")
   assert.equal(report.includes("/team-path"), false)
+})
+
+const update = (num: number, body: Buffer) => message(pb().bytes(1, pb().bytes(num, body)).done())
+const toolCall = message(
+  pb().bytes(2, pb().varint(1, 7).str(15, "x1").bytes(11, pb().str(1, "pi-bash").str(3, "call_1").str(5, "bash").done()).done()).done(),
+)
+
+test("usage reads a tool step makes after runAnswer returns stay in its turn, folded", async () => {
+  journal()
+  Object.assign(STEP_WAIT, { first: 0, every: 5, until: 40 })
+  let usage = 503
+  mock.method(globalThis, "fetch", async () => new Response("no", { status: usage }))
+  const step = {
+    connect: await cursor(() => [update(27, pb().varint(1, 1).done()), toolCall]),
+    messages: historical,
+    tools: [{ name: "bash", description: "", schema: { type: "object", properties: {} } }],
+  }
+  const first = await answer(step)
+  assert.equal((first.events.at(-1) as { stop?: string }).stop, "tool_calls")
+  usage = 403
+  await answer(step)
+  const report = await doctor()
+  assert.match(turnLines(report, 1).join("\n"), /^ {4}usage read unavailable \(503\) ×\d+$/m)
+  assert.match(turnLines(report, 2).join("\n"), /^ {4}usage read refused \(403\)$/m)
+  assert.equal(report.includes("Outside any turn"), false)
+  assert.match(report, /^ {2}This account: .*Cursor refuses its usage events until \d\d:\d\d:\d\dZ\.$/m)
 })
