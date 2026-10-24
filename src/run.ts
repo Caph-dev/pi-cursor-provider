@@ -27,6 +27,7 @@ import { canRead, ledger, owe, STEP_WAIT, usageKey } from "./ledger.ts"
 import { recall, store, tokenKey } from "./cache.ts"
 import { request as resolveModel, usable } from "./models.ts"
 import { NATIVE_LIMITS, NativeSessionError, nativeFields, nativeMcpArgs, nativeSessions } from "./native-session.ts"
+import { hostOf, type Account, type Host } from "./trace.ts"
 
 const NO_RESULT = "Tool use was interrupted and did not produce a result."
 
@@ -542,7 +543,34 @@ async function open(base, headers, signal, connect = defaultConnect, headerWaitM
 }
 
 export function resetH1() { h1Until = 0 }
-export function onH1() { return Date.now() < h1Until }
+
+/** What run.ts keeps between turns, in a form the doctor may print. */
+export type RunState = {
+  transport: { via: "h2" } | { via: "h1"; until: number }
+  /** This account's agent host. null before a turn asked, after the entry expired, or without an account. */
+  agent: { host: Host; source: "server-config" | "global-fallback"; until: number } | null
+  /** Live agent hosts cached for other accounts. */
+  otherAgents: number
+  /** Models Cursor said need max mode. Later turns ask for it. */
+  maxModeForced: readonly string[]
+}
+
+// Walks endpoints without recall(), which deletes the expired entries this skips.
+export function runState(account: Account | undefined, now = Date.now()): RunState {
+  let agent = null
+  let otherAgents = 0
+  for (const [key, entry] of endpoints) {
+    if (now >= entry.expires) continue
+    if (account?.is(key)) agent = { host: hostOf(entry.url), source: entry.listed ? "server-config" : "global-fallback", until: entry.expires }
+    else otherAgents++
+  }
+  return {
+    transport: now < h1Until ? { via: "h1", until: h1Until } : { via: "h2" },
+    agent,
+    otherAgents,
+    maxModeForced: [...maxOnly].sort(),
+  }
+}
 
 // decode follows the server's messages into the answer's pieces until the
 // turn ends, or the model has made its tool calls. stepUsage / owedUsage are

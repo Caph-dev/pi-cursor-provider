@@ -352,12 +352,48 @@ class Segment {
   }
 }
 
+/** States an owner in entries can be in. fail() removes an owner as it sets failed, cancelled, or expired. */
+export type OwnerPhase = "opening" | "running" | "submitting" | "awaiting-results" | "finalizing" | "complete"
+
+export type OwnerView = {
+  phase: OwnerPhase
+  model: string
+  maxMode: boolean
+  /** Tool batches handed back to the caller. */
+  rounds: number
+  /** The Run's absolute lifetime deadline. */
+  lifetimeEnds: number
+  /** Whether the owner belongs to the account the reader asked about. */
+  current: boolean
+}
+
+/** The pool in a form the doctor may print. */
+export type NativeState = {
+  owners: readonly OwnerView[]
+  limits: { perAccount: number; perProcess: number }
+}
+
 export class NativeSessionPool {
   constructor(limits = NATIVE_LIMITS) {
     this.limits = limits
     this.entries = new Set()
     this.handles = new Map()
     this.selectors = new Map()
+  }
+  // Takes anything with Account's is(), so this file imports nothing. Unlike
+  // prepare, create, and response(), it changes no owner.
+  state(account?: { is(fingerprint: string): boolean }): NativeState {
+    return {
+      owners: [...this.entries].sort((a, b) => a.expiresAt - b.expiresAt).map((owner) => ({
+        phase: owner.state,
+        model: owner.resolution?.id ?? "",
+        maxMode: !!owner.resolution?.maxMode,
+        rounds: owner.segments,
+        lifetimeEnds: owner.expiresAt,
+        current: !!account?.is(owner.account),
+      })),
+      limits: { perAccount: this.limits.perAccount, perProcess: this.limits.perProcess },
+    }
   }
   // selector is conversationID(chat, session): session/cache key AND first
   // user identity. Task subagents sharing a session must not own its parent.

@@ -13,6 +13,7 @@
 import { createHash } from "node:crypto"
 import { API, headersFor } from "./client.ts"
 import { sleep } from "./sleep.ts"
+import type { Account } from "./trace.ts"
 
 // STEP_WAIT is how long a step's event is looked for: first after that long,
 // then every so often until the end (each ask given `ask` to answer).
@@ -56,12 +57,57 @@ export const misses = new Map()
 const tokKey = (tok) => createHash("sha256").update(tok).digest("hex")
 export const usageKey = (tok, conv) => tokKey(tok) + "\0" + conv
 
+const stepsWait = (missed) => missed < STEP_WAIT.skipAfter || missed % STEP_WAIT.retryEvery === 0
+const refusedUntil = (at) => at + STEP_WAIT.owedFor
+
 export function canRead(tok) {
   const at = unreadable.get(tokKey(tok))
   if (at === undefined) return true
-  if (Date.now() - at < STEP_WAIT.owedFor) return false
+  if (Date.now() < refusedUntil(at)) return false
   unreadable.delete(tokKey(tok))
   return true
+}
+
+/** The usage ledger in a form the doctor may print. */
+export type LedgerState = {
+  /** Every account. */
+  owed: { runs: number; conversations: number; collecting: number }
+  /** The account the reader asked about. null without one. */
+  current: { runsOwed: number; misses: number; stepsWait: boolean; unreadableUntil: number | null } | null
+  /** Other accounts whose usage events Cursor still refuses. */
+  unreadableOthers: number
+}
+
+// Unlike canRead and owe, this deletes no expired entry.
+export function ledgerState(account: Account | undefined, now = Date.now()): LedgerState {
+  const live = (since) => now - since <= STEP_WAIT.owedFor
+  const runsOf = (d) => (d.groups ? d.groups.filter((g) => live(g.since)).reduce((n, g) => n + g.n, 0) : live(d.since) ? d.n : 0)
+  let runs = 0
+  let conversations = 0
+  let runsOwed = 0
+  for (const [key, d] of owed) {
+    const n = runsOf(d)
+    if (!n) continue
+    runs += n
+    conversations++
+    if (account?.is(key.slice(0, key.indexOf("\0")))) runsOwed += n
+  }
+  let collecting = 0
+  for (const set of flights.values()) collecting += set.size
+  let unreadableUntil = null
+  let unreadableOthers = 0
+  for (const [key, at] of unreadable) {
+    if (now >= refusedUntil(at)) continue
+    if (account?.is(key)) unreadableUntil = refusedUntil(at)
+    else unreadableOthers++
+  }
+  let missed = 0
+  for (const [key, n] of misses) if (account?.is(key)) missed = n
+  return {
+    owed: { runs, conversations, collecting },
+    current: account ? { runsOwed, misses: missed, stepsWait: stepsWait(missed), unreadableUntil } : null,
+    unreadableOthers,
+  }
 }
 
 const ZERO = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 })
@@ -246,7 +292,7 @@ export function ledger(tok, conv, since, signal, kept, { before } = {}) {
     async own() {
       if (!canRead(tok)) return null
       const m = misses.get(key) ?? 0
-      const waits = m < STEP_WAIT.skipAfter || m % STEP_WAIT.retryEvery === 0
+      const waits = stepsWait(m)
       if (!kept) {
         const r = waits ? await usageEvents(tok, conv, since, 1, { poll: true, signal }).catch(() => ({})) : {}
         if (r.usage) misses.delete(key)
