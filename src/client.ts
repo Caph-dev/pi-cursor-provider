@@ -60,7 +60,7 @@ export async function clientVersion() {
   return versionSaid
 }
 
-async function headersFor(tok) {
+export async function headersFor(tok) {
   return {
     "Content-Type": "application/json",
     "Connect-Protocol-Version": "1",

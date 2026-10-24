@@ -1,10 +1,10 @@
 # pi-cursor-provider
 
-Pi extension. Provider id: `cursor`. A turn is one HTTP/2 `AgentService/Run`.
+Pi extension. Provider id: `cursor`. A turn is one `AgentService/Run` (HTTP/2, with HTTP/1.1 RunSSE + BidiAppend when HTTP/2 cannot open).
 
 When this process still holds that Run, and the next turn's tool results use ids of the form `call_cursor_<hex>_<seg>_<i>`, those results are written to the open Run. If that owner is gone, the turn opens a new Run and sends the results as history. A stateless Run still closes after it returns tools. The same Pi session and the first user message keep a stable `conversation_id`.
 
-Pi 扩展，provider id 为 `cursor`。每一回合是一条 HTTP/2 `AgentService/Run`。同一进程仍持有这条 Run，且下一回合的工具结果 id 为 `call_cursor_<hex>_<seg>_<i>` 时，结果写回这条未关闭的 Run。找不到 owner 时退回新的 Run，把结果放进历史。无主的 Run 在返回工具后仍会关闭。同一会话加上第一条用户消息对应稳定的 `conversation_id`。
+Pi 扩展，provider id 为 `cursor`。每一回合是一条 `AgentService/Run`（默认 HTTP/2；HTTP/2 打不开时走 HTTP/1.1 的 RunSSE + BidiAppend）。同一进程仍持有这条 Run，且下一回合的工具结果 id 为 `call_cursor_<hex>_<seg>_<i>` 时，结果写回这条未关闭的 Run。找不到 owner 时退回新的 Run，把结果放进历史。无主的 Run 在返回工具后仍会关闭。同一会话加上第一条用户消息对应稳定的 `conversation_id`。
 
 ## Install
 
@@ -79,7 +79,13 @@ On-demand: $1.23 / $10.00
 Total: 35%
 ```
 
-A finished Run still reports token counts from TurnEnded when Cursor sends them. This package does not keep magpie's deferred step-usage ledger.
+### Step usage (deferred ledger)
+
+A finished Run reports token counts from `TurnEnded` when Cursor sends them. A tool step has no `TurnEnded` until results return on the same Run: after the Run closes, this package reads the dashboard's usage events (`GetFilteredUsageEvents`) by `conversation_id`, as magpie does.
+
+Far from Cursor the event can land after the short poll. That step then reports 0 used and the conversation owes the event. Later steps collect it in the background. What a step collected of earlier steps is not added to its own `prompt_tokens` (Pi reads that as context fill); it is `usage.magpie_deferred` (`prompt_tokens`, `completion_tokens`, `cached_tokens`, `cache_write_tokens`). Pi ignores that field for context size.
+
+A step that ends the turn waits for remaining debt. After three misses in a row for an account, steps stop waiting (retrying every tenth). Unreadable accounts (4xx on the events API) fall back to the previous estimate. Native finals also settle earlier debt into `magpie_deferred`, separately from the last call's share of `TurnEnded`.
 
 ## Native Run continuation
 
@@ -92,7 +98,24 @@ Resume happens only when every id in the trailing tool-result batch belongs to o
 - The history does not match the sealed batch.
 - The owner is busy, expired, or near its lifetime deadline.
 
-The stateless path still cancels the HTTP/2 stream after tools. The native path does not.
+The stateless path still cancels the stream after tools. The native path does not.
+
+## Transport
+
+- Default: HTTP/2 `AgentService/Run` at the agent host from `ServerConfigService/GetServerConfig` (else the global agent URL).
+- When HTTP/2 cannot open (no response head in 15s, ALPN / "h2 is not supported" / HTTP/2 protocol errors), the Run goes as Cursor's clients do without HTTP/2: `AgentService/RunSSE` down and `BidiService/BidiAppend` up over HTTP/1.1 on `api2.cursor.sh`. Blocked HTTP/2 keeps later Runs on HTTP/1.1 for 10 minutes; a plain connection failure leaves the next Run to try HTTP/2 again.
+- A regional refusal refreshes GetServerConfig and retries once when the agent URL changed (or the failed attempt was already on HTTP/1.1). That refresh clears the HTTP/1.1 stickiness so the region's agent host can use HTTP/2 again.
+- "Max Mode Required" retries once with Max Mode and remembers that model id for the process.
+
+## Known gaps
+
+Compared with magpie [`packages/cursor`](https://github.com/magpie-community/plugins/tree/main/packages/cursor), this package still does not include:
+
+- Parked long-lived HTTP/2 bridge, checkpoint resume, and run journal (that is `@rahularya01/pi-cursor`'s model; this package stays per-turn Run + optional same-process native continuation).
+- OpenCode chat-completions adapter surface (`X-Magpie-Cursor-Continuity` headers, AI SDK message shapes beyond what Pi `streamSimple` needs).
+- Multi-account switching; web search and other Cursor-owned tools (refused like magpie).
+- Full empty-reply diagnostics (`emptyWhy` field inventory) and some magpie-only decode edge reporting.
+- Browser / API-key exchange login paths that magpie implements for OpenCode (Pi uses `/login cursor` and the credential sources above).
 
 ## Development
 
@@ -102,7 +125,7 @@ npm run check
 npm test
 ```
 
-`npm test` stays off the Cursor network. `codec.ts`, `run.ts`, `models.ts`, `client.ts`, and `native-session.ts` keep their `// @ts-nocheck` magpie-port headers.
+`npm test` stays off the Cursor network (fetch is mocked where the dashboard is involved). `codec.ts`, `run.ts`, `models.ts`, `client.ts`, `ledger.ts`, and `native-session.ts` keep their `// @ts-nocheck` magpie-port headers.
 
 ## License
 

@@ -1,6 +1,6 @@
 {
   "name": "pi-cursor-provider",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Cursor provider for Pi: one HTTP/2 AgentService/Run per turn (magpie-aligned).",
   "license": "MIT",
   "type": "module",

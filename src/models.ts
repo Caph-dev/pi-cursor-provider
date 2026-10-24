@@ -3,7 +3,7 @@
  *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
- * Dashboard usage accounting is intentionally not ported.
+ * Billing-period windows live in usage.ts; per-step deferred usage in ledger.ts.
  */
 // @ts-nocheck
 import { createHash } from "node:crypto"

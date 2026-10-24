@@ -5,19 +5,25 @@
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  * which itself was ported from magpie's Go client (internal/provider/cursor*.go).
  *
- * Not ported: parked HTTP/2 sessions, checkpoint resume, run journals, the
- * deferred usage ledger, and the OpenCode chat-completions adapter.
+ * Not ported: parked HTTP/2 sessions, checkpoint resume, run journals, and the
+ * OpenCode chat-completions adapter.
+ * The deferred dashboard usage ledger is ported: a tool step without TurnEnded
+ * reads GetFilteredUsageEvents, owes late events to the conversation, and
+ * reports earlier steps as magpie_deferred so prompt_tokens stay this step's.
  * The stateless path still ends the Run when tools are returned. Pi executes
  * them and the next request carries the results as history.
- * The native path keeps that HTTP/2 Run open. A later turn whose tool results
- * use matching call_cursor_<hex>_<seg>_<i> ids writes those results back to it.
+ * The native path keeps that HTTP/2 (or H1/SSE) Run open. A later turn whose
+ * tool results use matching call_cursor_<hex>_<seg>_<i> ids writes those
+ * results back to it.
  */
 // @ts-nocheck
 import { createHash, randomBytes, randomUUID } from "node:crypto"
 import http2 from "node:http2"
+import { Duplex } from "node:stream"
 import { isDeepStrictEqual } from "node:util"
 import { EMPTY, failure, field, fields, frame, frames, pb, pbAny, pbNum, pbStr, pbValue, regional } from "./codec.ts"
 import { AGENT, API, CALL, GOOS, NAMESPACE, clientVersion, tempDir, unary } from "./client.ts"
+import { canRead, ledger, owe, STEP_WAIT, usageKey } from "./ledger.ts"
 import { request as resolveModel, usable } from "./models.ts"
 import { NATIVE_LIMITS, NativeSessionError, nativeFields, nativeMcpArgs, nativeSessions } from "./native-session.ts"
 
@@ -316,74 +322,239 @@ export function clearAgentCache() {
 }
 
 // open starts a Run at base: the session, the stream, and the response's
-// headers. Waiting for those headers is capped: a server that never
-// answers, or that drops the stream first, must not hold the turn open.
+// status, or an error the request never got past. A Run HTTP/2 can't open
+// goes over HTTP/1.1 (openH1). When the failure says HTTP/2 itself can't be
+// had here (h2Blocked), the Runs after it go straight to HTTP/1.1 for
+// H2.retryAfter, or until a region error sends one back (runAnswer); a
+// connection that failed (refused, no network) or a stream the server
+// refused leaves the next Run to try HTTP/2 again.
+//
+// Tests may inject `connect`; that path stays HTTP/2-only with headerWaitMs.
+let h1Until = 0
 const HEADER_WAIT_MS = 30_000
+const H2 = {
+  wait: 15_000,
+  retryAfter: 10 * 60_000,
+}
+const H1 = { appendWait: 60_000 }
 // After at least one tool call, a stream that never closes must not pin the turn.
 const TOOL_IDLE_MS = 3_000
+const NET = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EPIPE"]
+const cancelledOpen = () => ({ error: { status: 410, message: "the request was cancelled" }, h2Failed: false })
 
-function open(base, headers, signal, connect = defaultConnect, headerWaitMs = HEADER_WAIT_MS) {
+function h2Blocked(e) {
+  if (e?.h2Timeout) return true
+  const code = String(e?.code ?? "")
+  const text = `${code} ${e?.message ?? ""}`
+  if (NET.some((c) => text.includes(c))) return false
+  if (code === "ERR_HTTP2_STREAM_ERROR") return false
+  return code.startsWith("ERR_HTTP2") || /h2 is not supported|alpn|nghttp2|protocol error/i.test(text)
+}
+
+function connectCode(status) {
+  return { 400: "invalid_argument", 401: "unauthenticated", 403: "permission_denied", 429: "resource_exhausted" }[status] ?? "unavailable"
+}
+
+function openH2(base, headers, signal, connect = defaultConnect, headerWaitMs = H2.wait) {
+  if (signal?.aborted) return Promise.resolve(cancelledOpen())
   return new Promise((resolve) => {
     const u = new URL(base)
-    if (signal?.aborted) {
-      resolve({ error: { status: 499, message: "the request was cancelled" } })
-      return
-    }
     let session
     try {
       session = connect(u.origin)
     } catch (e) {
-      resolve({ error: { status: 502, message: e?.message ?? String(e) } })
+      resolve({ error: { status: 502, message: e?.message ?? String(e) }, h2Failed: true, blocked: h2Blocked(e) })
       return
     }
     let done = false
     let timer
-    const fail = (e) => {
+    const fail = (e, h2Failed = true) => {
       if (done) return
       done = true
       clearTimeout(timer)
-      try {
-        session.destroy()
-      } catch {}
-      resolve({ error: { status: 502, message: e?.message ?? String(e) } })
+      signal?.removeEventListener("abort", abort)
+      try { session.destroy() } catch {}
+      resolve({ error: { status: h2Failed ? 502 : 410, message: e?.message ?? String(e) }, h2Failed, blocked: h2Failed && h2Blocked(e) })
     }
+    const abort = () => fail(new Error("the request was cancelled"), false)
     const wait = Number(headerWaitMs)
-    timer = setTimeout(() => fail(new Error("Cursor did not answer")), Number.isFinite(wait) && wait > 0 ? wait : HEADER_WAIT_MS)
-    const closed = () => fail(new Error("the connection closed"))
+    timer = setTimeout(
+      () => fail(Object.assign(new Error(`no answer over HTTP/2 in ${(Number.isFinite(wait) && wait > 0 ? wait : H2.wait) / 1000}s`), { h2Timeout: true })),
+      Number.isFinite(wait) && wait > 0 ? wait : H2.wait,
+    )
+    const closed = () => fail(Object.assign(new Error("the connection closed"), { code: "ERR_HTTP2_STREAM_ERROR" }))
     session.on("error", fail)
-    session.on("close", closed)
-    session.on("goaway", closed)
     const req = session.request({
       ":method": "POST",
       ":path": u.pathname.replace(/\/+$/, "") + "/agent.v1.AgentService/Run",
       ...headers,
     })
     req.on("error", fail)
-    req.on("aborted", closed)
-    req.on("close", closed)
+    req.once("close", () => {
+      if (!done) fail(Object.assign(new Error(`the HTTP/2 stream closed before its response (code ${req.rstCode ?? "?"})`), { code: "ERR_HTTP2_STREAM_ERROR" }))
+    })
     req.once("response", (h) => {
       if (done) return
       done = true
       clearTimeout(timer)
+      signal?.removeEventListener("abort", abort)
       const headersOut = {}
       for (const [k, v] of Object.entries(h ?? {})) headersOut[k] = Array.isArray(v) ? v.join(", ") : String(v ?? "")
       resolve({ session, req, status: Number(h[":status"]), headers: headersOut })
     })
-    signal?.addEventListener("abort", () => fail(new Error("the request was cancelled")), { once: true })
+    signal?.addEventListener("abort", abort, { once: true })
+    if (signal?.aborted) abort()
   })
 }
 
-// runOnce is one Run of the chat on the agent API at base: an async
+function openH1(headers, signal) {
+  if (signal?.aborted) return Promise.resolve(cancelledOpen())
+  const ac = new AbortController()
+  const id = headers["x-request-id"]
+  const h = { ...headers, "accept-encoding": "identity", "x-cursor-streaming": "true" }
+  let ended = false
+  let seq = 0
+  let reader
+  const req = new Duplex({
+    read() {},
+    write(chunk, _enc, cb) {
+      const msg = Buffer.from(chunk).subarray(5)
+      const n = seq++
+      append(msg, n).then(() => cb(), (e) => cb(e))
+    },
+  })
+  const cleanup = () => {
+    signal?.removeEventListener("abort", close)
+    ac.abort()
+    reader?.cancel().catch(() => {})
+  }
+  const end = (body) => {
+    if (ended || req.destroyed) return
+    ended = true
+    const f = frame(Buffer.from(body))
+    f[0] = 2
+    req.push(f)
+    req.push(null)
+    cleanup()
+  }
+  const failed = async (res) => {
+    const text = await res.text().catch(() => "")
+    let e
+    try { e = JSON.parse(text) } catch {}
+    end(JSON.stringify({ error: typeof e?.code === "string" ? e : { code: connectCode(res.status), message: text.trim() || `HTTP ${res.status}` } }))
+  }
+  const append = async (msg, n) => {
+    if (ended || ac.signal.aborted) return
+    const body = pb().str(1, msg.toString("hex")).bytes(2, pb().str(1, id).done()).varint(3, n).done()
+    const ms = H1.appendWait + Math.ceil(body.length / 65536) * 1000
+    const deadline = AbortSignal.timeout(ms)
+    try {
+      const res = await fetch(API + "/aiserver.v1.BidiService/BidiAppend", {
+        method: "POST",
+        headers: { ...h, "content-type": "application/proto", "connect-protocol-version": "1" },
+        body,
+        signal: AbortSignal.any([ac.signal, deadline]),
+      })
+      if (ended || ac.signal.aborted) { await res.body?.cancel().catch(() => {}); return }
+      if (!res.ok) return failed(res)
+      await res.arrayBuffer()
+    } catch (e) {
+      if (ac.signal.aborted) return
+      if (deadline.aborted) return end(JSON.stringify({ error: { code: "deadline_exceeded", message: `BidiAppend got no answer in ${Math.round(ms / 1000)}s` } }))
+      end(JSON.stringify({ error: { code: "unavailable", message: `BidiAppend: ${e?.message ?? e}` } }))
+    }
+  }
+  const close = () => {
+    ended = true
+    cleanup()
+    req.destroy()
+  }
+  signal?.addEventListener("abort", close, { once: true })
+  if (signal?.aborted) {
+    close()
+    return Promise.resolve(cancelledOpen())
+  }
+  ;(async () => {
+    try {
+      const res = await fetch(API + "/agent.v1.AgentService/RunSSE", {
+        method: "POST",
+        headers: { ...h, "content-type": "application/connect+proto", "connect-protocol-version": "1" },
+        body: frame(pb().str(1, id).done()),
+        signal: ac.signal,
+      })
+      if (ended || ac.signal.aborted) { await res.body?.cancel().catch(() => {}); return }
+      if (!res.ok) return failed(res)
+      reader = res.body.getReader()
+      try {
+        while (!ended && !req.destroyed) {
+          const { value, done } = await reader.read()
+          if (done) break
+          if (!ended && !req.destroyed) req.push(Buffer.from(value))
+        }
+      } finally {
+        reader.releaseLock()
+        reader = undefined
+      }
+      if (!ended && !req.destroyed) {
+        ended = true
+        req.push(null)
+        cleanup()
+      }
+    } catch (e) {
+      if (!ac.signal.aborted) end(JSON.stringify({ error: { code: "unavailable", message: `RunSSE: ${e?.message ?? e}` } }))
+    }
+  })()
+  return Promise.resolve(signal?.aborted ? cancelledOpen() : { session: { close, destroy: close }, req: Object.assign(req, { close }), status: 200, h1: true, headers: {} })
+}
 
-async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_IDLE_MS }) {
+async function open(base, headers, signal, connect = defaultConnect, headerWaitMs = HEADER_WAIT_MS) {
+  if (signal?.aborted) return cancelledOpen()
+  // Injected connect (tests): HTTP/2 only, keep the caller's header wait.
+  if (connect !== defaultConnect) {
+    return openH2(base, headers, signal, connect, headerWaitMs)
+  }
+  if (Date.now() >= h1Until) {
+    const o = await openH2(base, headers, signal, defaultConnect, H2.wait)
+    if (signal?.aborted) {
+      try { o.req?.close?.(http2.constants.NGHTTP2_CANCEL) } catch {}
+      try { o.session?.destroy?.() } catch {}
+      return cancelledOpen()
+    }
+    if (!o.h2Failed) return o
+    if (o.blocked) h1Until = Date.now() + H2.retryAfter
+  }
+  if (signal?.aborted) return cancelledOpen()
+  return openH1(headers, signal)
+}
+
+export function resetH1() { h1Until = 0 }
+export function onH1() { return Date.now() < h1Until }
+
+// decode follows the server's messages into the answer's pieces until the
+// turn ends, or the model has made its tool calls. stepUsage / owedUsage are
+// the deferred dashboard ledger (magpie): a tool step without TurnEnded reads
+// usage events; earlier debt leaves as magpie_deferred.
+export async function* decode(stream, { send, blobs, tools, estimate = 0, close, stepUsage, owedUsage, toolIdleMs = TOOL_IDLE_MS }) {
   let calls = 0
+  let answered = 0
   let ended = false
   let listed = 0
-  // wrote: the reply's text alone; a turn of thinking only says nothing
+  const stepDone = () => {
+    if (!listed || calls + answered < listed) return false
+    if (calls > 0) return true
+    listed = 0
+    answered = 0
+    return false
+  }
+  let said = 0
   let wrote = 0
   let usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
-  const finish = () => {
+  let counted = false
+  const finish = (more) => {
+    if (!counted && !usage.output) usage.output = Math.floor((said + 3) / 4)
+    if (!counted && !usage.input && !usage.cacheRead && !usage.cacheWrite) usage.input = estimate
     const prompt = usage.input + usage.cacheRead + usage.cacheWrite
+    const deferred = more && more.input + more.output + more.cacheRead + more.cacheWrite > 0
     return {
       stop: calls > 0 ? "tool_calls" : "stop",
       usage: {
@@ -392,19 +563,38 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
         total_tokens: prompt + usage.output,
         prompt_tokens_details: { cached_tokens: usage.cacheRead, cache_write_tokens: usage.cacheWrite },
         ...(usage.reasoning ? { completion_tokens_details: { reasoning_tokens: usage.reasoning } } : {}),
+        ...(deferred
+          ? {
+              magpie_deferred: {
+                prompt_tokens: more.input + more.cacheRead + more.cacheWrite,
+                completion_tokens: more.output,
+                cached_tokens: more.cacheRead,
+                cache_write_tokens: more.cacheWrite,
+              },
+            }
+          : {}),
       },
     }
   }
-  const settled = () => {
-    // Stateless path only. Tools are full, so cancel this Run. Their results ride the next request.
-    // A native Run does not use this decoder, and it leaves the stream open.
-    if (calls > 0) close?.()
-    return finish()
+  const settled = async () => {
+    // Stateless path: tools are full, so cancel this Run. Their results ride the next request.
+    if (calls > 0 && !ended && stepUsage) {
+      close?.()
+      const u = await stepUsage().catch(() => null)
+      if (u) usage = u
+      counted = u === false || !!u
+    } else if (calls > 0) {
+      close?.()
+    }
+    return finish(owedUsage ? await owedUsage(calls === 0).catch(() => null) : null)
   }
   const closeExec = (id) => send(pb().bytes(5, pb().bytes(1, pb().varint(1, id))).done())
-  const iter = stream[Symbol.asyncIterator]()
+  async function* asAsync(src) {
+    yield* src
+  }
+  const iter = asAsync(stream)[Symbol.asyncIterator]()
   let idleTimer
-  const moreComing = () => calls > 0 && !(listed > 0 && calls >= listed)
+  const moreComing = () => calls > 0 && !(listed > 0 && calls + answered >= listed)
   try {
     while (true) {
       const pending = iter.next().then((v) => ({ v }), (e) => ({ e }))
@@ -419,12 +609,12 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
         clearTimeout(idleTimer)
       } else got = await pending
       if (got.idle) {
-        yield settled()
+        yield await settled()
         return
       }
       if (got.e) throw got.e
       if (got.v.done) {
-        if (calls > 0) yield settled()
+        if (calls > 0) yield await settled()
         else yield { error: { status: 502, message: "the reply broke off: EOF" } }
         return
       }
@@ -443,35 +633,35 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
               const uf = fields(u.data)
               switch (u.num) {
                 case 1: {
-                  // text
                   const t = pbStr(uf, 1)
                   if (t) {
                     wrote += t.length
+                    said += t.length
                     yield { text: t }
                   }
                   break
                 }
                 case 4: {
-                  // thinking
                   const t = pbStr(uf, 1)
-                  if (t) yield { reasoning: t }
+                  if (t) {
+                    said += t.length
+                    yield { reasoning: t }
+                  }
                   break
                 }
                 case 14: // turn ended, with what it used
                   usage = usageOf(uf)
                   ended = true
+                  counted = true
                   if (calls === 0) {
-                    // nothing written and nothing called: an empty reply,
-                    // which the client asks again, not a finished turn
-                    yield wrote === 0 ? { error: { status: 502, message: "an empty reply" } } : settled()
+                    yield wrote === 0 ? { error: { status: 502, message: "an empty reply" } } : await settled()
                     return
                   }
-                  // The calls for this turn are already here. Do not wait for the stream to end.
-                  yield settled()
+                  yield await settled()
                   return
-                case 27: // how many tool calls the step makes, sent before them
+                case 27: // how many tool calls the step makes
                   listed = pbNum(uf, 1)
-                  if (listed > 0 && calls >= listed) {
+                  if (stepDone()) {
                     yield await settled()
                     return
                   }
@@ -480,18 +670,18 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
             }
             break
           case 2: {
-            // exec_server_message: the server asks the client to run something
             const call = exec(m.data, tools, send, closeExec)
-            if (call) yield { tool: { index: calls++, ...call } }
-            if (listed > 0 && calls >= listed) {
-              // every call made: the caller runs them
+            if (call) {
+              said += (call.args ?? "").length
+              yield { tool: { index: calls++, ...call } }
+            } else if (!fields(m.data).some((e) => e.num === 10)) answered++
+            if (stepDone()) {
               yield await settled()
               return
             }
             break
           }
           case 4: {
-            // kv_server_message: a blob wanted, or one to keep
             const kv = fields(m.data)
             const id = pbNum(kv, 1)
             for (const k of kv) {
@@ -501,7 +691,6 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
                 const res = b ? pb().bytes(1, b) : pb().bytes(2, pb().str(1, "blob not found"))
                 send(pb().bytes(3, pb().varint(1, id).bytes(2, res)).done())
               } else if (k.num === 3) {
-                // the server's own record of the turn, not needed
                 send(pb().bytes(3, pb().varint(1, id).bytes(3, EMPTY)).done())
               }
             }
@@ -512,7 +701,7 @@ async function* decode(stream, { send, blobs, tools, close, toolIdleMs = TOOL_ID
     }
   } catch (e) {
     if (calls > 0 && /EOF/.test(e?.message ?? "")) {
-      yield settled()
+      yield await settled()
       return
     }
     yield { error: { status: 502, message: "the reply broke off: " + (e?.message ?? e) } }
@@ -631,6 +820,8 @@ function cursorHeaders(tok, version, extra) {
 
 async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, params, connect, onResponse, onPayload, headers, headerWaitMs, toolIdleMs }) {
   const cid = convID || randomUUID()
+  const since = Date.now()
+  const book = ledger(tok, cid, since, signal, !!convID)
   let modelId = id
   if (onPayload) {
     const replaced = await onPayload({ model: modelId, maxMode: !!maxMode, params, conversationId: cid, tools: tools.map((t) => t.name) })
@@ -640,7 +831,7 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   }
   const { first, blobs } = buildRun(conv.msgs, conv.last, tools, modelId, cid, { maxMode, params })
   const o = await open(base, cursorHeaders(tok, await clientVersion(), headers), signal, connect, headerWaitMs)
-  if (o.error) return o
+  if (o.error) return book.done(), { ...o, h1: !!o.h1 }
   if (onResponse) await onResponse({ status: o.status, headers: o.headers ?? {} })
   const { session, req } = o
   let closed = false
@@ -666,6 +857,11 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
     }, 1000).unref?.()
   }
   signal?.addEventListener("abort", close, { once: true })
+  if (signal?.aborted) {
+    close()
+    book.done()
+    return cancelledOpen()
+  }
   send(first)
   if (o.status < 200 || o.status > 299) {
     const chunks = []
@@ -673,31 +869,39 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
       for await (const c of req) chunks.push(c)
     } catch {}
     close()
-    return { error: failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)) }
+    book.done()
+    return { error: failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)), h1: !!o.h1 }
   }
-  const it = decode(frames(req), { send, blobs, tools, close, toolIdleMs })
+  const it = decode(frames(req), {
+    send,
+    blobs,
+    tools,
+    estimate: conv.estimate,
+    close,
+    stepUsage: book.own,
+    owedUsage: book.owed,
+    toolIdleMs,
+  })
   const wrapped = (async function* () {
     try {
       yield* it
     } finally {
       close()
+      book.done()
     }
   })()
   const head = await wrapped.next()
-  if (head.done) return { error: { status: 502, message: "an empty reply" } }
+  if (head.done) return book.done(), { error: { status: 502, message: "an empty reply" }, h1: !!o.h1 }
   if (head.value?.error) {
     await wrapped.return?.()
-    return { error: head.value.error }
+    return { error: head.value.error, h1: !!o.h1 }
   }
   return {
     conversationId: cid,
+    h1: !!o.h1,
     events: (async function* () {
-      try {
-        yield head.value
-        yield* wrapped
-      } finally {
-        await wrapped.return?.()
-      }
+      yield head.value
+      yield* wrapped
     })(),
   }
 }
@@ -817,12 +1021,46 @@ function nativeTransport(req, close, fail, limits = NATIVE_LIMITS) {
   }
 }
 
-// runNative keeps the Run open across tool batches. Accounting is a no-op.
-// The deferred dashboard ledger is not ported. TurnEnded usage is what a
-// finished Run reports.
+// runNative keeps the Run open across tool batches. Accounting uses the
+// deferred dashboard ledger: settle collects earlier debt as magpie_deferred;
+// an abandoned pending Run is owed once to the same conversation.
 async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, params, native, connect, onResponse, onPayload, headers, headerWaitMs }) {
   const cid = convID || randomUUID()
-  native.accounting = { started() {}, async settle() { return null }, delivered() {}, abandon() {} }
+  const since = Date.now()
+  const accounting = new AbortController()
+  const book = ledger(tok, cid, since, accounting.signal, !!convID, { before: since })
+  const debtKey = usageKey(tok, cid)
+  let started = false, settled = false, deferred = null
+  native.accounting = {
+    started() { started = true },
+    async settle() {
+      const more = await book.owed(true)
+      if (settled) {
+        if (more) owe(debtKey, { carry: more })
+        return null
+      }
+      deferred = more
+      return more
+    },
+    delivered() {
+      if (settled) return
+      settled = true
+      deferred = null
+      book.done()
+      accounting.abort()
+    },
+    abandon() {
+      if (settled) return
+      settled = true
+      book.done()
+      accounting.abort()
+      if (deferred) owe(debtKey, { carry: deferred })
+      deferred = null
+      if (started && native.segments > 0 && !native.finalUsage && convID && canRead(tok)) {
+        owe(debtKey, { since, n: 1, ready: Date.now() + STEP_WAIT.owedAt })
+      }
+    },
+  }
   let modelId = id
   if (onPayload) {
     const replaced = await onPayload({ model: modelId, maxMode: !!maxMode, params, conversationId: cid, tools: tools.map((t) => t.name) })
@@ -841,7 +1079,7 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
   if (o.error) {
     native.fail(o.error)
     nativeSessions.forget(native)
-    return o
+    return { ...o, h1: !!o.h1 }
   }
   if (onResponse) await onResponse({ status: o.status, headers: o.headers ?? {} })
   const { session, req } = o
@@ -855,7 +1093,7 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
     native.bind(transport, blobs, conv.estimate)
     if (native.error) {
       nativeSessions.forget(native)
-      return { error: native.error }
+      return { error: native.error, h1: !!o.h1 }
     }
     native.send(first)
     native.accounting.started()
@@ -864,7 +1102,7 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
       for await (const c of req) chunks.push(c)
       native.fail(failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)))
       nativeSessions.forget(native)
-      return { error: native.error }
+      return { error: native.error, h1: !!o.h1 }
     }
     native.pumpTask = (async () => {
       await native.pump(frames(req))
@@ -876,7 +1114,7 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
       const error = head.value?.error ?? { status: 502, message: "an empty reply" }
       await native.cancel(error.message)
       nativeSessions.forget(native)
-      return { error }
+      return { error, h1: !!o.h1 }
     }
     let firstEvent = head
     const events = {
@@ -895,12 +1133,12 @@ async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, 
       return: () => it.return(),
       [Symbol.asyncIterator]() { return this },
     }
-    return { conversationId: cid, events }
+    return { conversationId: cid, events, h1: !!o.h1 }
   } catch (e) {
     native.fail({ status: e.status ?? 502, message: e.message })
     await native.pumpTask
     nativeSessions.forget(native)
-    return { error: native.error }
+    return { error: native.error, h1: !!o.h1 }
   }
 }
 
@@ -909,6 +1147,7 @@ export function clearMaxOnly() {
 }
 
 export { nativeSessions } from "./native-session.ts"
+export { STEP_WAIT, ledger, owed, misses, unreadable, clearLedger, usageKey } from "./ledger.ts"
 
 /** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
 export async function runAnswer({
@@ -1011,8 +1250,10 @@ export async function runAnswer({
   }
   let ran = await once()
   if (ran.error && regional(ran.error.message)) {
+    resetH1()
     const fresh = await resolveAgentURL(tok, true)
-    if (fresh !== base) {
+    const viaH1 = !!ran.h1
+    if (fresh !== base || viaH1) {
       base = fresh
       ran = await once()
     }

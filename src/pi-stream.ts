@@ -39,6 +39,13 @@ type RunUsage = {
   completion_tokens?: number
   prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
   completion_tokens_details?: { reasoning_tokens?: number }
+  /** Earlier steps' usage collected with this step; not applied to Pi context size. */
+  magpie_deferred?: {
+    prompt_tokens?: number
+    completion_tokens?: number
+    cached_tokens?: number
+    cache_write_tokens?: number
+  }
 }
 type RunEvent = {
   text?: string
