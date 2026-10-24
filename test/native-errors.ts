@@ -196,30 +196,30 @@ test("prepare retires an owner near its lifetime deadline and then finds no owne
 })
 
 const attachment = { role: "user", content: [{ type: "text", text: "Attached image(s) from tool result:" }, image] }
-const incompatible: [string, (ids: string[]) => unknown[], number?][] = [
-  ["the history before the calls changed", (ids) => [{ role: "user", content: "hullo" }, asked(ids), ...results(ids)]],
-  ["the results arrive without their assistant", (ids) => [...opening, ...results(ids)]],
-  ["the assistant has a field the native path does not know", (ids) => [...opening, asked(ids, { name: "pi" }), ...results(ids)]],
-  ["the assistant shows an image", (ids) => [...opening, asked(ids, { content: [image] }), ...results(ids)]],
-  ["a call is not a function call", (ids) => [...opening, asked(ids, { tool_calls: ids.map((id) => ({ ...call(id), type: "custom" })) }), ...results(ids)]],
-  ["a call's arguments are not JSON", (ids) => [...opening, asked(ids, { tool_calls: ids.map((id) => call(id, "not json")) }), ...results(ids)]],
-  ["the assistant text changed", (ids) => [...opening, asked(ids, { content: "changed" }), ...results(ids)]],
-  ["a call's arguments changed", (ids) => [...opening, asked(ids, { tool_calls: ids.map((id) => call(id, '{"text":"hi"}')) }), ...results(ids)]],
-  ["a user message among the results carries a call's ID", (ids) => [...opening, asked(ids), { role: "user", tool_call_id: ids[1], content: "wait" }, result(ids[0])], 2],
-  ["a result repeats", (ids) => [...answered(ids), result(ids[0])]],
-  ["a result answers an unknown call", (ids) => [...opening, asked(ids), result(ids[0]), result("call_other")], 2],
-  ["a result has no content", (ids) => [...opening, asked(ids), result(ids[0], null)]],
-  ["an image attachment follows a result with no content", (ids) => [...opening, asked(ids), result(ids[0], null), attachment]],
-  ["a result part is neither text nor an image", (ids) => [...opening, asked(ids), result(ids[0], [{ type: "file", file: { file_id: "f" } }])]],
-  ["a result image is empty", (ids) => [...opening, asked(ids), result(ids[0], [{ type: "image_url", image_url: { url: "data:image/png;base64," } }])]],
-  ["only one of two parallel results arrives", (ids) => [...opening, asked(ids), result(ids[0])], 2],
+const incompatible: [string, (ids: string[]) => unknown[], string, number?][] = [
+  ["the history before the calls changed", (ids) => [{ role: "user", content: "hullo" }, asked(ids), ...results(ids)], "native continuation history diverged"],
+  ["the results arrive without their assistant", (ids) => [...opening, ...results(ids)], "native continuation is missing its assistant tool calls"],
+  ["the assistant has a field the native path does not know", (ids) => [...opening, asked(ids, { name: "pi" }), ...results(ids)], "unsupported assistant fields in native continuation"],
+  ["the assistant shows an image", (ids) => [...opening, asked(ids, { content: [image] }), ...results(ids)], "unsupported native assistant display"],
+  ["a call is not a function call", (ids) => [...opening, asked(ids, { tool_calls: ids.map((id) => ({ ...call(id), type: "custom" })) }), ...results(ids)], "unsupported native continuation tool call"],
+  ["a call's arguments are not JSON", (ids) => [...opening, asked(ids, { tool_calls: ids.map((id) => call(id, "not json")) }), ...results(ids)], "invalid tool arguments in native continuation"],
+  ["the assistant text changed", (ids) => [...opening, asked(ids, { content: "changed" }), ...results(ids)], "native continuation assistant output changed"],
+  ["a call's arguments changed", (ids) => [...opening, asked(ids, { tool_calls: ids.map((id) => call(id, '{"text":"hi"}')) }), ...results(ids)], "native continuation tool calls changed"],
+  ["a user message among the results carries a call's ID", (ids) => [...opening, asked(ids), { role: "user", tool_call_id: ids[1], content: "wait" }, result(ids[0])], "new input cannot be interleaved with pending native results", 2],
+  ["a result repeats", (ids) => [...answered(ids), result(ids[0])], "duplicate native tool result"],
+  ["a result answers an unknown call", (ids) => [...opening, asked(ids), result(ids[0]), result("call_other")], "unknown native tool result", 2],
+  ["a result has no content", (ids) => [...opening, asked(ids), result(ids[0], null)], "unsupported native tool result"],
+  ["an image attachment follows a result with no content", (ids) => [...opening, asked(ids), result(ids[0], null), attachment], "unsupported native tool result"],
+  ["a result part is neither text nor an image", (ids) => [...opening, asked(ids), result(ids[0], [{ type: "file", file: { file_id: "f" } }])], "unsupported native tool result content"],
+  ["a result image is empty", (ids) => [...opening, asked(ids), result(ids[0], [{ type: "image_url", image_url: { url: "data:image/png;base64," } }])], "invalid native result image"],
+  ["only one of two parallel results arrives", (ids) => [...opening, asked(ids), result(ids[0])], "all parallel native tool results must be submitted together", 2],
 ]
-for (const [name, history, calls = 1] of incompatible) {
+for (const [name, history, detail, calls = 1] of incompatible) {
   test(`prepare falls back and leaves the owner resumable when ${name}`, async () => {
     const pool = newPool()
     const { owner, ids } = await sealed(pool, calls)
     owner.delivered()
-    assert.deepEqual(prepare(pool, history(ids)), { fallback: "history incompatible with retained owner" })
+    assert.deepEqual(prepare(pool, history(ids)), { fallback: "history incompatible with retained owner", detail })
     assert.equal(prepare(pool, answered(ids)).owner, owner)
   })
 }
@@ -239,45 +239,51 @@ test("prepare falls back to owner busy while its selector has a live owner", asy
   assert.equal(prepare(pool, opening).fallback, undefined)
 })
 
-test("create returns null when another create took the selector after prepare", async () => {
+test("create falls back to owner busy when another create took the selector after prepare", async () => {
   const pool = newPool()
   const first = prepare(pool, opening)
   const second = prepare(pool, opening)
   const owner = pool.create(first, resolution, wire) as any
-  assert.equal(pool.create(second, resolution, wire), null)
+  assert.deepEqual(pool.create(second, resolution, wire), { fallback: "owner busy" })
   await owner.cancel("the Chat response was cancelled")
-  assert.ok(pool.create(second, resolution, wire))
+  assert.equal((pool.create(second, resolution, wire) as any).state, "opening")
 })
 
-test("create returns null at the account cap until that account has a finished owner", async () => {
+test("create falls back at the account cap until that account has a finished owner", async () => {
   const pool = newPool({ perAccount: 1 })
   await complete(create(pool, "other-token", "session-x"))
   const owner = create(pool)
   const next = prepare(pool, opening, token, "session-b")
-  assert.equal(pool.create(next, resolution, wire), null)
+  assert.deepEqual(pool.create(next, resolution, wire), { fallback: "account owner limit" })
   await complete(owner)
-  assert.ok(pool.create(next, resolution, wire))
+  assert.equal((pool.create(next, resolution, wire) as any).state, "opening")
 })
 
-test("create returns null at the process cap until some owner has finished", async () => {
+test("create falls back at the process cap until some owner has finished", async () => {
   const pool = newPool({ perProcess: 1 })
   const owner = create(pool, "token-a")
   const next = prepare(pool, opening, "token-b")
-  assert.equal(pool.create(next, resolution, wire), null)
+  assert.deepEqual(pool.create(next, resolution, wire), { fallback: "process owner limit" })
   await complete(owner)
-  assert.ok(pool.create(next, resolution, wire))
+  assert.equal((pool.create(next, resolution, wire) as any).state, "opening")
 })
 
-test("create returns null for opening history the native digest rejects", () => {
+test("create falls back for opening history the native digest rejects", () => {
   const pool = newPool()
-  for (const assistant of [
-    { role: "assistant", content: [image] },
-    { role: "assistant", content: "", tool_calls: [call("call_1", "not json")] },
-  ]) {
+  for (const [assistant, detail] of [
+    [{ role: "assistant", content: [image] }, "unsupported native assistant display"],
+    [{ role: "assistant", content: "", tool_calls: [call("call_1", "not json")] }, "invalid tool arguments in native continuation"],
+  ] as const) {
     const prepared = prepare(pool, [...opening, assistant, { role: "user", content: "next" }])
     assert.equal(prepared.fallback, undefined)
-    assert.equal(pool.create(prepared, resolution, wire), null)
+    assert.deepEqual(pool.create(prepared, resolution, wire), { fallback: "opening history not retainable", detail })
   }
+})
+
+test("create hands back prepare's fallback", () => {
+  const pool = newPool()
+  const prepared = prepare(pool, [...answered(["call_cursor_ab_0_0"]), { role: "user", content: "next" }])
+  assert.equal(pool.create(prepared, resolution, wire), prepared)
 })
 
 test("bind rejects bootstrap blobs over blobBytes", () => {

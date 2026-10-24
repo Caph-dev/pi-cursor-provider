@@ -5,7 +5,7 @@
  * Ported from magpie's native-session.mjs (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  * Self-contained. The only import is node:crypto. Run wiring passes pb, exec,
- * usageOf, and failure in. This file does not import the rest of the package.
+ * usageOf, failure, and trace in. This file does not import the rest of the package.
  */
 import { createHash, randomBytes } from "node:crypto"
 
@@ -437,7 +437,7 @@ export class NativeSessionPool {
         return { owner, batch, results, encoded, digest, chat }
       } catch (e) {
         if (!(e instanceof NativeSessionError)) throw e
-        return fallback("history incompatible with retained owner")
+        return { fallback: "history incompatible with retained owner", detail: e.message }
       }
     }
     // Pending ancestors, new input, and terminal old handles are ordinary
@@ -447,19 +447,20 @@ export class NativeSessionPool {
     return { account, selector, controls, selected: !!selector, chat }
   }
   create(prepared, resolution, wire) {
-    if (prepared.fallback || prepared.selected && this.selectors.has(prepared.account + ":" + prepared.selector)) return null
+    if (prepared.fallback) return prepared
+    if (prepared.selected && this.selectors.has(prepared.account + ":" + prepared.selector)) return { fallback: "owner busy" }
     const crowded = () => this.entries.size >= this.limits.perProcess || [...this.entries].filter((e) => e.account === prepared.account).length >= this.limits.perAccount
     while (crowded()) {
       const accountFull = [...this.entries].filter((e) => e.account === prepared.account).length >= this.limits.perAccount
       const finished = [...this.entries].find((e) => ["complete", "failed", "cancelled", "expired"].includes(e.state) && (!accountFull || e.account === prepared.account))
-      if (!finished) return null
+      if (!finished) return { fallback: accountFull ? "account owner limit" : "process owner limit" }
       this.forget(finished)
     }
     let owner
     try { owner = new NativeSession(this, prepared, resolution, wire) }
     catch (e) {
       if (!(e instanceof NativeSessionError)) throw e
-      return null
+      return { fallback: "opening history not retainable", detail: e.message }
     }
     this.entries.add(owner)
     if (prepared.selected) this.selectors.set(owner.account + ":" + owner.selector, owner)

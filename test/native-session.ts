@@ -57,7 +57,7 @@ test("a sealed batch resumes on the same owner through a fake transport", async 
   const opening = chat([{ role: "user", content: "hello" }])
   const prepared = pool.prepare("synthetic-token", opening, "session-a", tools)
   const owner = pool.create(prepared, { id: "synthetic-model", maxMode: false, params: [] }, wire) as any
-  assert.ok(owner)
+  assert.equal(owner.state, "opening")
   const writes: Buffer[] = []
   let closed = 0
   owner.chatTools = tools

@@ -1283,6 +1283,7 @@ async function answer({
     try {
       const conv = conversation(chat, listed)
       const resumed = prepared.owner.resume({ ...prepared, estimate: conv.estimate }, signal)
+      trace?.note("native", { path: "resumed" })
       return { conversationId: convID, events: withDelivery(prepared.owner, resumed.events) }
     } catch (e) {
       return { error: { status: e?.status ?? 502, message: e?.message ?? String(e) } }
@@ -1303,10 +1304,15 @@ async function answer({
   const conv = conversation(chat, listed)
   let base = await resolveAgentURL(tok, false, signal)
   const once = async () => {
-    const native = prepared.fallback ? null : nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure })
+    const made = nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure, trace })
+    const native = made.fallback ? null : made
+    trace?.note("native", native ? { path: "created" } : { path: "declined", fallback: made.fallback, detail: made.detail })
     const args = { tok, base, id, tools: listed, conv, convID, signal, maxMode, params, connect, onResponse, onPayload, headers, headerWaitMs, toolIdleMs }
     let response = native ? await runNative({ ...args, native }) : await runOnce(args)
-    if (response.error?.retentionIneligible && !signal?.aborted) response = await runOnce(args)
+    if (response.error?.retentionIneligible && !signal?.aborted) {
+      trace?.note("native", { path: "abandoned", error: response.error })
+      response = await runOnce(args)
+    }
     return response
   }
   let ran = await once()

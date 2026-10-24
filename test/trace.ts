@@ -243,3 +243,21 @@ test("the doctor lists each turn with its transport, and why HTTP/1.1 took over"
   assert.match(turnLines(report, 2).join("\n"), new RegExp(`^    run: h1 to api2\\.cursor\\.sh\\. HTTP/2 to a\\.example failed \\(alpn negotiation failed\\), sticky until ${clock}\\.$`, "m"))
   assert.match(turnLines(report, 3).join("\n"), new RegExp(`^    run: h1 to api2\\.cursor\\.sh, sticky until ${clock}$`, "m"))
 })
+
+const historical = [
+  { role: "user", content: "hi" },
+  { role: "assistant", content: "", tool_calls: [{ id: "call_cursor_ab_0_0", type: "function", function: { name: "bash", arguments: "{}" } }] },
+  { role: "tool", tool_call_id: "call_cursor_ab_0_0", content: "ok" },
+  { role: "user", content: "next" },
+]
+
+test("the doctor shows a native Run created, or declined with prepare's reason", async () => {
+  journal()
+  const connect = await cursor(() => [text("done"), end()])
+  const created = await answer({ connect })
+  const declined = await answer({ connect, messages: historical })
+  assert.deepEqual([created.error, declined.error], [undefined, undefined])
+  const report = await doctor()
+  assert.deepEqual(turnLines(report, 1).slice(1), ["    native: created", "    run: h2 to a.example"])
+  assert.deepEqual(turnLines(report, 2).slice(1), ["    native: declined, historical native calls", "    run: h2 to a.example"])
+})
