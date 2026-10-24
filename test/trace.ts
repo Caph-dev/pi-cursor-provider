@@ -370,3 +370,25 @@ test("usage reads a tool step makes after runAnswer returns stay in its turn, fo
   assert.equal(report.includes("Outside any turn"), false)
   assert.match(report, /^ {2}This account: .*Cursor refuses its usage events until \d\d:\d\d:\d\dZ\.$/m)
 })
+
+test("two concurrent turns keep their own decisions through real HTTP/2 streams", async () => {
+  journal()
+  const connect = await cursor(() => [text("done"), end()], { delayMs: 20 })
+  await Promise.all([
+    answer({ connect }),
+    answer({ connect, tok: OTHER, resolveAgentURL: async () => "https://b.example/agent" }),
+  ])
+  const report = await doctor()
+  assert.deepEqual(turnLines(report, 1).slice(1), ["    native: created", "    run: h2 to a.example"])
+  assert.deepEqual(turnLines(report, 2).slice(1), ["    native: created", "    run: h2 to b.example"])
+  assert.match(turnLines(report, 1)[0], /, this account$/)
+  assert.match(turnLines(report, 2)[0], /, another account$/)
+})
+
+test("with CURSOR_DEBUG off a turn records nothing and the doctor says the journal is off", async () => {
+  const ran = await answer({ connect: await cursor(() => [text("done"), end()]) })
+  assert.equal(ran.error, undefined)
+  const report = await doctor()
+  assert.match(report, /^Decision journal off\. Start Pi with CURSOR_DEBUG=1 to record retry and fallback reasons\.$/m)
+  assert.equal(report.includes("Recent decisions"), false)
+})
