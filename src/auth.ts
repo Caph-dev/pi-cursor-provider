@@ -15,6 +15,9 @@ import { join } from "node:path"
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@earendil-works/pi-ai"
 import { readStoredCredential } from "@earendil-works/pi-coding-agent"
 import { API, clientVersion } from "./client.ts"
+import { sleep } from "./sleep.ts"
+
+export { sleep }
 
 const LOGIN_URL = "https://cursor.com/loginDeepControl"
 const POLL_URL = `${API}/auth/poll`
@@ -58,24 +61,6 @@ export function expiresAt(token: string): number {
   const exp = jwtExpiryMs(token)
   if (!exp) return Date.now() + 60 * 60 * 1000
   return Math.max(exp - 5 * 60 * 1000, Date.now() + 60 * 1000)
-}
-
-export function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error("Cursor sign-in cancelled"))
-      return
-    }
-    const timer = setTimeout(resolve, ms)
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer)
-        reject(new Error("Cursor sign-in cancelled"))
-      },
-      { once: true },
-    )
-  })
 }
 
 function openBrowser(url: string) {
