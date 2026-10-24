@@ -1,4 +1,4 @@
-# pi-cursor-provider
+# @caph42/pi-cursor-provider
 
 Pi extension. Provider id: `cursor`. A turn is one `AgentService/Run` (HTTP/2, with HTTP/1.1 RunSSE + BidiAppend when HTTP/2 cannot open).
 
@@ -11,7 +11,7 @@ Pi 扩展，provider id 为 `cursor`。每一回合是一条 `AgentService/Run`�
 Node.js ≥ 22. This package peers `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` (Pi already provides them).
 
 ```bash
-pi install npm:pi-cursor-provider
+pi install npm:@caph42/pi-cursor-provider
 ```
 
 From a local checkout, install or link that directory:
@@ -41,12 +41,50 @@ Then select a model:
 /model cursor/<id>
 ```
 
+## Hide models
+
+`/model` lists every model Cursor offers the account. To shorten it, put `cursor.json` beside Pi's config (`$PI_CODING_AGENT_DIR/cursor.json`, else `~/.pi/agent/cursor.json`):
+
+```json
+{ "hiddenModels": ["claude-*", "gpt-5", "cursor/gpt-5-mini"] }
+```
+
+The extension registers a native Pi provider. Its synchronous model directory and availability filter read `cursor.json`, so local rules apply even when Cursor cannot refresh its remote catalogue. The availability filter also covers models added through `models.json`.
+
+Successful discovery saves the complete catalogue in Pi's `models-store.json`. Startup and `/reload` restore that catalogue before applying the current hide rules; a session-start refresh discovers models when no cache exists. Offline mode restores the cache without fetching. A failed remote refresh keeps the previous catalogue, and a first-load failure is reported instead of silently returning an empty list.
+
+A pattern matches the whole id `/model` shows (the part after `cursor/`), ignoring case. `*` stands for any run of characters; every other character, `?` included, is literal. A pattern without the `@300k` size suffix hides every context size of that model. A missing or malformed file hides nothing, and `/cursor.doctor` prints the patterns in force. Reopen `/model` and let its catalogue refresh finish to see the new list. After updating the extension itself, run `/reload` once. When developing from a checkout, configure that local path as the package source; `/reload` reloads configured sources and does not copy checkout changes into an npm installation.
+
+Hidden models are removed from the live provider directory, so normal directory lookups no longer resolve their ids. A session already running on a hidden model keeps it; resuming one may require selecting another model. `/cursor.usage` still classifies usage by every model the account has.
+
+Pi keeps a separate scoped model list (`/scoped-models`, `enabledModels`, or `--models`). Its picker can retain previously scoped model objects independently of the provider directory. If a hidden model still appears under **scoped**, remove it with `/scoped-models` and update any matching scope patterns. Provider filtering cannot remove those saved references through the public extension API.
+
+If resume must keep working for the scoped-away models, Pi's own `enabledModels` setting scopes `/model` without removing anything from the registry: `{ "enabledModels": ["cursor/*sonnet*"] }` opens the picker on that scope, and Tab still reaches the rest.
+
+## Fast mode
+
+Select a Cursor model, then use:
+
+```text
+/cursor.fast on
+/cursor.fast status
+/cursor.fast off
+```
+
+With no argument, `/cursor.fast` shows the current status. In the TUI, type `/cursor.fast ` and press Tab to choose `on` or `off`; a unique prefix such as `of` completes to `off` without executing the command. You can still type `/cursor.fast status` explicitly to query the status. In the TUI, `fast: on`, `fast: off`, or `fast: unavailable` appears on the second footer row beside the model/thinking information. Other extension statuses retain their own row. RPC clients continue receiving the `cursor-fast` status text. Enabling fast preserves the selected model ID, context size, and thinking level. It requires an account-available fast variant at the same context and effective thinking parameters; unsupported combinations are rejected.
+
+The setting defaults to off and belongs to the current model in the current session. Other models keep their own settings. Reloading or resuming that session restores the setting from its current branch; a new session starts with fast off. Changes apply to the next request and require the current response to finish first.
+
+If fast is enabled and a later thinking change or catalogue update removes support, the footer shows `fast: on (unavailable)` and requests report an error until you select a supported thinking level or run `/cursor.fast off`. The command does not add duplicate fast models to `/model`.
+
+The second-row display uses Pi 1.4's custom-footer slot and its default renderer. On other Pi versions it falls back to the standard status row until the footer adapter is verified. Extensions that replace the same footer slot can replace this layout; Cursor yields if another extension takes ownership.
+
 ## How this relates to other Cursor packages
 
 | Package | Role |
 | --- | --- |
 | `@rahularya01/pi-cursor` | Pi provider that keeps a long-lived HTTP/2 bridge, with checkpoint resume and a run journal. |
-| `cursor-for-pi` | The same per-turn AgentService/Run protocol. `pi-cursor-provider` is that port under the magpie-aligned package name. |
+| `cursor-for-pi` | The same per-turn AgentService/Run protocol. `@caph42/pi-cursor-provider` is that port under the magpie-aligned package name. |
 | `@magpie-community/opencode-cursor-auth` | Cursor auth and Run for the OpenCode / magpie host. This package speaks Pi `streamSimple`. |
 
 ## Usage
@@ -56,7 +94,7 @@ Then select a model:
 The same report is exported from the package.
 
 ```ts
-import { fetchUsage, formatUsage, onDemandOf } from "pi-cursor-provider"
+import { fetchUsage, formatUsage, onDemandOf } from "@caph42/pi-cursor-provider"
 ```
 
 `fetchUsage(token, modelIds)` returns `{ plan?, windows, error? }`. `formatUsage` turns that into the text the command shows. `onDemandOf` reads a period payload and a hard-limit payload into `fixed`, `unlimited`, `disabled`, or `unavailable`.

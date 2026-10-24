@@ -322,6 +322,23 @@ function thinkingLevelMap(levels) {
   return map
 }
 
+// Fast must have an account-served variant with the normal request's other
+// parameters intact. A fast variant at another context or effort is not enough.
+export function supportsFast(raw, id, effort = "off") {
+  const entry = raw.find((model) => model.id === id)
+  if (!entry?.offersFast) return false
+  const normal = Object.fromEntries(pick(entry, effort, false).params.map((p) => [p.id, p.value]))
+  const quick = Object.fromEntries(pick(entry, effort, true).params.map((p) => [p.id, p.value]))
+  if (quick.fast !== "true" || Object.keys({ ...normal, ...quick }).some((key) => key !== "fast" && normal[key] !== quick[key])) return false
+  return entry.variants.some((variant) => {
+    const have = valuesOf(variant)
+    if (have.fast !== "true") return false
+    return Object.keys({ ...normal, ...have }).every((key) =>
+      key === "fast" || have[key] === normal[key],
+    )
+  })
+}
+
 /** Pi chat-model configs. Cost stays zero: a subscription bill is not a token price. */
 export function piModelConfigs(raw) {
   return raw.map((m) => {
@@ -336,6 +353,7 @@ export function piModelConfigs(raw) {
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: m.context || DEFAULT_CONTEXT,
       maxTokens: 32_000,
+      cursorFastLevels: PI_LEVELS.filter(([level]) => supportsFast(raw, m.id, level)).map(([level]) => level),
     }
   })
 }

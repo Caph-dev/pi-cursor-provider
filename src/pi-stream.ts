@@ -29,6 +29,11 @@ import type {
 } from "@earendil-works/pi-ai"
 import { resolveAccessToken } from "./auth.ts"
 import { runAnswer } from "./run.ts"
+import { supportsFast, usable } from "./models.ts"
+
+export interface CursorStreamOptions extends SimpleStreamOptions {
+  fast?: boolean
+}
 
 /** Shown when no Cursor credential is available. */
 export const CURSOR_NOT_SIGNED_IN = "Cursor isn't signed in. Run /login cursor or set CURSOR_ACCESS_TOKEN."
@@ -269,7 +274,7 @@ export async function emitCursorEvents(
 export function streamCursor(
   model: Model<Api>,
   context: TranscriptContext,
-  options?: SimpleStreamOptions,
+  options?: CursorStreamOptions,
 ): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream()
   void pump(stream, model, context, options)
@@ -280,7 +285,7 @@ async function pump(
   stream: AssistantMessageEventStream,
   model: Model<Api>,
   context: TranscriptContext,
-  options?: SimpleStreamOptions,
+  options?: CursorStreamOptions,
 ) {
   const message = blank(model)
   const fail = (reason: Extract<StopReason, "error" | "aborted">, text: string) => {
@@ -298,12 +303,17 @@ async function pump(
       fail("error", CURSOR_NOT_SIGNED_IN)
       return
     }
+    if (options?.fast && !supportsFast(await usable(auth.token), model.id, options.reasoning ?? "off")) {
+      fail("error", `Cursor fast is enabled but unavailable for ${model.id} at thinking ${options.reasoning ?? "off"}. Use /cursor.fast off or choose a supported thinking level.`)
+      return
+    }
     const piTools = options?.toolChoice === "none" ? [] : getCurrentTools(context.messages)
     const system = getCurrentSystemPrompt(context.messages)
     const ran = await runAnswer({
       tok: auth.token,
       model: model.id,
       effort: options?.reasoning ?? "",
+      fast: options?.fast,
       messages: toChat(context.messages, system),
       tools: piTools.map((tool) => ({
         name: tool.name,
