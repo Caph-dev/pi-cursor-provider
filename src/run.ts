@@ -1321,13 +1321,16 @@ async function answer({
     resetH1()
     const fresh = await resolveAgentURL(tok, true, signal)
     const viaH1 = !!ran.h1
-    if ((fresh !== base || viaH1) && !signal?.aborted) {
+    const again = (fresh !== base || viaH1) && !signal?.aborted
+    trace?.note("retry", { rule: "region", error: ran.error, to: again ? fresh : undefined, cancelled: !!signal?.aborted })
+    if (again) {
       base = fresh
       ran = await once()
     }
   }
   if (signal?.aborted) return ran
   if (ran.error && !maxMode && maxRequired(ran.error.message)) {
+    trace?.note("retry", { rule: "max-mode", error: ran.error, model: id })
     maxMode = true
     maxOnly.add(id)
     ran = await once()

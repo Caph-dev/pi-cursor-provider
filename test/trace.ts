@@ -273,3 +273,25 @@ test("the doctor shows why a native owner ended, which fail() forgets", async ()
     "    owner ended: failed, composer-test (overloaded)",
   ])
 })
+
+test("CURSOR_DEBUG keeps region and max-mode retry reasons and the doctor prints them", async () => {
+  journal()
+  const regional = () => {
+    throw new Error("not in this region")
+  }
+  await answer({
+    connect: regional,
+    resolveAgentURL: async (_token: string, fresh: boolean) => (fresh ? "https://b.example/agent" : "https://a.example/agent"),
+  })
+  await answer({ connect: regional })
+  await answer({
+    model: "composer-max",
+    connect: () => {
+      throw new Error("Max Mode required")
+    },
+  })
+  const report = await doctor()
+  assert.match(turnLines(report, 1).join("\n"), /^ {4}region error \(502, not in this region\)\. Retried on b\.example\.$/m)
+  assert.match(turnLines(report, 2).join("\n"), /^ {4}region error \(502, not in this region\)\. Not retried because the agent host did not change and the Run used HTTP\/2\.$/m)
+  assert.match(turnLines(report, 3).join("\n"), /^ {4}max mode required for composer-max \(502, Max Mode required\)\. Retried with max mode\.$/m)
+})
