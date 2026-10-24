@@ -293,14 +293,14 @@ function buildRun(msgs, lastUser, tools, model, conv = "", { maxMode = false, pa
 // while it can't be had.
 
 const endpoints = new Map()
-export async function agentURL(tok, fresh) {
+export async function agentURL(tok, fresh, signal?: AbortSignal) {
   const key = createHash("sha256").update(tok).digest("hex")
   const had = endpoints.get(key)
   if (!fresh && had && (had.listed || Date.now() - had.at < 60_000)) return had.url
   let url = AGENT
   let listed = false
   try {
-    const cfg = await unary(API, "aiserver.v1.ServerConfigService/GetServerConfig", tok, {}, 10_000)
+    const cfg = await unary(API, "aiserver.v1.ServerConfigService/GetServerConfig", tok, {}, 10_000, signal)
     for (const raw of [cfg?.agentUrlConfig?.agentUrl, cfg?.agentUrlConfig?.agentnUrl]) {
       try {
         const u = new URL(raw)
@@ -311,7 +311,10 @@ export async function agentURL(tok, fresh) {
         }
       } catch {}
     }
-  } catch {}
+  } catch (e) {
+    if (signal?.aborted) throw e
+  }
+  if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
   // A refresh that learns nothing must not replace a regional URL with the global one.
   if (!listed && fresh && had?.url) return had.url
   endpoints.set(key, { url, at: Date.now(), listed })
@@ -1178,7 +1181,7 @@ export async function runAnswer({
   session?: string
   signal?: AbortSignal
   connect?: (origin: string) => unknown
-  resolveAgentURL?: (tok: string, fresh: boolean) => Promise<string> | string
+  resolveAgentURL?: (tok: string, fresh: boolean, signal?: AbortSignal) => Promise<string> | string
   rawModels?: unknown
   onResponse?: (response: { status: number; headers: Record<string, string> }) => unknown
   onPayload?: (payload: unknown) => unknown
@@ -1231,7 +1234,7 @@ export async function runAnswer({
   let raw = rawModels
   if (raw === undefined) {
     try {
-      raw = await usable(tok)
+      raw = await usable(tok, false, signal)
     } catch {
       raw = []
     }
@@ -1241,7 +1244,7 @@ export async function runAnswer({
   let params = resolved.params
   let maxMode = resolved.maxMode || maxOnly.has(id)
   const conv = conversation(chat, listed)
-  let base = await resolveAgentURL(tok, false)
+  let base = await resolveAgentURL(tok, false, signal)
   const once = async () => {
     const native = prepared.fallback ? null : nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure })
     const args = { tok, base, id, tools: listed, conv, convID, signal, maxMode, params, connect, onResponse, onPayload, headers, headerWaitMs, toolIdleMs }
@@ -1252,7 +1255,7 @@ export async function runAnswer({
   let ran = await once()
   if (ran.error && regional(ran.error.message)) {
     resetH1()
-    const fresh = await resolveAgentURL(tok, true)
+    const fresh = await resolveAgentURL(tok, true, signal)
     const viaH1 = !!ran.h1
     if (fresh !== base || viaH1) {
       base = fresh

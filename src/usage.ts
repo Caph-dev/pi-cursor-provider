@@ -15,6 +15,15 @@ export const WEBSITE = "https://cursor.com"
 const PLAN_TTL = 3600_000
 const plans = new Map<string, { plan: string; at: number }>()
 
+function until(ms: number, signal?: AbortSignal): AbortSignal {
+  const deadline = AbortSignal.timeout(ms)
+  return signal ? AbortSignal.any([deadline, signal]) : deadline
+}
+
+function cancelled(signal: AbortSignal | undefined, err: unknown): boolean {
+  return signal?.aborted === true || (err instanceof Error && err.name === "AbortError")
+}
+
 export type UsageWindow = {
   name: string
   used: number
@@ -102,31 +111,32 @@ export function onDemandOf(data: { spendLimitUsage?: Spend } | undefined, hard: 
   return limit > 0 ? { kind: "fixed", usedDollars, limitDollars: limit } : { kind: "disabled", usedDollars }
 }
 
-async function hardLimit(tok: string): Promise<HardLimit | undefined> {
+async function hardLimit(tok: string, signal?: AbortSignal): Promise<HardLimit | undefined> {
   try {
     const res = await fetch(API + "/aiserver.v1.DashboardService/GetHardLimit", {
       method: "POST",
       headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json", "Connect-Protocol-Version": "1" },
       body: "{}",
-      signal: AbortSignal.timeout(15_000),
+      signal: until(15_000, signal),
     })
     return res.ok ? ((await res.json()) ?? undefined) : undefined
-  } catch {
+  } catch (err) {
+    if (cancelled(signal, err)) throw err
     return undefined
   }
 }
 
 const dollars = (n: number) => "$" + n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-async function periodUsage(tok: string, ids: string[]): Promise<UsageReport> {
+async function periodUsage(tok: string, ids: string[], signal?: AbortSignal): Promise<UsageReport> {
   const [res, hard] = await Promise.all([
     fetch(API + "/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
       method: "POST",
       headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json", "Connect-Protocol-Version": "1" },
       body: "{}",
-      signal: AbortSignal.timeout(15_000),
+      signal: until(15_000, signal),
     }),
-    hardLimit(tok),
+    hardLimit(tok, signal),
   ])
   if (!res.ok) return { error: statusText(res.status), windows: [] }
   const data = (await res.json()) as Period
@@ -168,20 +178,22 @@ async function periodUsage(tok: string, ids: string[]): Promise<UsageReport> {
   }
 }
 
-async function planOf(tok: string): Promise<string> {
+async function planOf(tok: string, signal?: AbortSignal): Promise<string> {
   const had = plans.get(tok)
   if (had && Date.now() - had.at < PLAN_TTL) return had.plan
   try {
-    const body = await unary(API, "aiserver.v1.DashboardService/GetPlanInfo", tok)
+    const body = await unary(API, "aiserver.v1.DashboardService/GetPlanInfo", tok, {}, 15_000, signal)
+    if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
     const plan = String(body?.planInfo?.planName ?? "").trim()
     if (plan) plans.set(tok, { plan, at: Date.now() })
     return plan || had?.plan || ""
-  } catch {
+  } catch (err) {
+    if (cancelled(signal, err)) throw err
     return had?.plan ?? ""
   }
 }
 
-async function botUsage(tok: string): Promise<UsageWindow[]> {
+async function botUsage(tok: string, signal?: AbortSignal): Promise<UsageWindow[]> {
   try {
     const subject = JSON.parse(Buffer.from(tok.split(".")[1] ?? "", "base64url").toString()).sub
     if (typeof subject !== "string") return []
@@ -197,8 +209,9 @@ async function botUsage(tok: string): Promise<UsageWindow[]> {
       },
       body: "{}",
       redirect: "error",
-      signal: AbortSignal.timeout(5_000),
+      signal: until(5_000, signal),
     })
+    if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
     if (!res.ok) return []
     const data = (await res.json()) as {
       includedLimitZero?: boolean
@@ -219,14 +232,19 @@ async function botUsage(tok: string): Promise<UsageWindow[]> {
         ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString(), span: 604800 } : {}),
       },
     ]
-  } catch {
+  } catch (err) {
+    if (cancelled(signal, err)) throw err
     return []
   }
 }
 
 /** Plan name plus the billing-period windows. GetPlanInfo is cached for about an hour per token. */
-export async function fetchUsage(tok: string, modelIds: string[]): Promise<UsageReport> {
-  const [u, plan, bot] = await Promise.all([periodUsage(tok, modelIds), planOf(tok), botUsage(tok)])
+export async function fetchUsage(tok: string, modelIds: string[], signal?: AbortSignal): Promise<UsageReport> {
+  const [u, plan, bot] = await Promise.all([
+    periodUsage(tok, modelIds, signal),
+    planOf(tok, signal),
+    botUsage(tok, signal),
+  ])
   const last = (w: UsageWindow) => w.name === "Total" || (w.name === "On-demand" && w.aside)
   const windows = [...u.windows.filter((w) => !last(w)), ...bot, ...u.windows.filter(last)]
   return { ...u, windows, ...(plan ? { plan } : {}) }

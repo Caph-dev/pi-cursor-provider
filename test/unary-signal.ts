@@ -42,8 +42,7 @@ test("aborting a model refresh stops the request and does not keep the catalog",
   }) as typeof fetch
   const ac = new AbortController()
   try {
-    const refresh = usable as (tok: string, force: boolean, signal?: AbortSignal) => Promise<unknown>
-    const pending = refresh(TOKEN, true, ac.signal)
+    const pending = usable(TOKEN, true, ac.signal)
     const started = Date.now()
     while (signals.length < 2 && Date.now() - started < 2_000) {
       await new Promise((resolve) => setTimeout(resolve, 10))

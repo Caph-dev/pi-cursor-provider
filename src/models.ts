@@ -241,20 +241,25 @@ function fitEffort(want, levels) {
 // can't give is a failure: magpie keeps the list it had. A usable list it
 // can't give leaves the picker as it is.
 const lists = new Map()
-export async function usable(tok, force = false) {
+export async function usable(tok, force = false, signal?: AbortSignal) {
+  if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
   const h = createHash("sha256").update(tok).digest("hex")
   const had = lists.get(h)
   if (!force && had && Date.now() - had.at < MODELS_KEEP) return had.raw
   const [j, ids] = await Promise.all([
-    unary(API, "aiserver.v1.AiService/AvailableModels", tok, { useModelParameters: true, doNotUseMarkdown: true }, 30_000),
-    unary(API, "agent.v1.AgentService/GetUsableModels", tok, {}, 8_000).then(
+    unary(API, "aiserver.v1.AiService/AvailableModels", tok, { useModelParameters: true, doNotUseMarkdown: true }, 30_000, signal),
+    unary(API, "agent.v1.AgentService/GetUsableModels", tok, {}, 8_000, signal).then(
       (u) => {
         const ids = new Set((u?.models ?? []).flatMap((m) => [m.modelId, m.displayModelId]).filter(Boolean))
         return ids.size ? ids : null
       },
-      () => null,
+      (err) => {
+        if (signal?.aborted) throw err
+        return null
+      },
     ),
   ])
+  if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
   const raw = modelsOf(Array.isArray(j?.models) ? j.models : [], ids)
   if (!raw.length) throw new Error("Cursor listed no models")
   lists.set(h, { at: Date.now(), raw })
