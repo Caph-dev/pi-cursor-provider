@@ -212,7 +212,7 @@ function createTrace(): Trace {
 // Declared after everything createTrace reads at module load.
 export let trace: Trace | undefined = enabled(process.env.CURSOR_DEBUG) ? createTrace() : undefined
 
-/** Tests: a fresh, empty journal, or none. */
+/** For tests. Swaps in a fresh, empty journal, or none. */
 export function traceForTests(on: boolean): void {
   trace = on ? createTrace() : undefined
 }

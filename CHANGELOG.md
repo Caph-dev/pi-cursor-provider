@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `/cursor.doctor` shows the transport, the agent host, native owners, and the usage ledger, with UTC times. It prints no token, header, or token hash, and reading it changes nothing.
+- `CURSOR_DEBUG=1` keeps an in-memory journal of each turn's decisions, which `/cursor.doctor` prints. It records retry, fallback, and failure reasons that were dropped before.
+- A native Run that cannot be created names its reason instead of returning `null`. A history mismatch keeps the specific error as `detail`.
 - A finished login wait removes its abort listener.
 - `headerWaitMs` is the HTTP/2 header timer. Callers who omit it still wait 15 seconds.
 - Cancelling a request aborts the Connect call. A late model catalog is not cached.
