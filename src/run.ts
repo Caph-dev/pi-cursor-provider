@@ -142,7 +142,8 @@ export function conversation(chat, tools) {
         pending.splice(i, 1)
         const text = textOf(m.content)
         size += text.length
-        results.push(result(id, text, false))
+        // told Cursor isError (magpie #; Pi sets isError on toolResult)
+        results.push(result(id, text, m.is_error === true || m.isError === true))
       }
       continue
     }

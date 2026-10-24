@@ -77,3 +77,36 @@ test("pb roundtrips a string field", () => {
   const encoded = pb().str(1, "hi").done()
   assert.equal(pbStr(fields(encoded), 1), "hi")
 })
+
+test("conversation forwards isError on tool results", async () => {
+  const { conversation } = await import("../src/run.ts")
+  const tools = [
+    {
+      name: "echo",
+      description: "echo",
+      schema: { type: "object", properties: {} },
+      schemaText: "{}",
+    },
+  ]
+  const chat = {
+    messages: [
+      { role: "user", content: "hi" },
+      {
+        role: "assistant",
+        content: "",
+        tool_calls: [{ id: "call_1", type: "function", function: { name: "echo", arguments: "{}" } }],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "boom", isError: true },
+    ],
+  }
+  const { msgs } = conversation(chat, tools)
+  const toolMsg = msgs.map((b: Buffer) => JSON.parse(Buffer.from(b).toString())).find((m: { role: string }) => m.role === "tool")
+  assert.equal(toolMsg?.content?.[0]?.isError, true)
+})
+
+test("statusOf maps context-too-long to 400", async () => {
+  const { statusOf } = await import("../src/codec.ts")
+  const mapped = statusOf(400, "invalid_argument", "prompt is too long for the model")
+  assert.equal(mapped.status, 400)
+  assert.match(mapped.message, /input is too long for the model's context/)
+})

@@ -114,6 +114,7 @@ Compared with magpie [`packages/cursor`](https://github.com/magpie-community/plu
 - Parked long-lived HTTP/2 bridge, checkpoint resume, and run journal (that is `@rahularya01/pi-cursor`'s model; this package stays per-turn Run + optional same-process native continuation).
 - OpenCode chat-completions adapter surface (`X-Magpie-Cursor-Continuity` headers, AI SDK message shapes beyond what Pi `streamSimple` needs).
 - Multi-account switching; web search and other Cursor-owned tools (refused like magpie).
+- Client-side context compaction / summarization when the window fills (Pi or the host may compact before calling; this provider only maps Cursor's "input is too long" / context-length errors, same as magpie).
 - Full empty-reply diagnostics (`emptyWhy` field inventory) and some magpie-only decode edge reporting.
 - Browser / API-key exchange login paths that magpie implements for OpenCode (Pi uses `/login cursor` and the credential sources above).
 
