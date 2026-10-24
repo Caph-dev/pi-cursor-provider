@@ -12,14 +12,31 @@ function catalog(url: string): Response {
   })
 }
 
+function aborted(): Error {
+  return Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
+}
+
+// Node 22 leaves AbortSignal.timeout unref'd. A bare hanging fetch lets the
+// test runner decide the event loop is finished while the assertion is still waiting.
+function fetchUntilAbort(init?: RequestInit): Promise<Response> {
+  return new Promise((_resolve, reject) => {
+    const signal = init?.signal
+    const hold = setTimeout(() => reject(aborted()), 5_000)
+    const fail = () => {
+      clearTimeout(hold)
+      reject(aborted())
+    }
+    if (!signal || signal.aborted) {
+      fail()
+      return
+    }
+    signal.addEventListener("abort", fail, { once: true })
+  })
+}
+
 test("unary still rejects when its timeout wins", async () => {
   const original = globalThis.fetch
-  globalThis.fetch = ((_url: string, init?: RequestInit) =>
-    new Promise((_resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => {
-        reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))
-      })
-    })) as typeof fetch
+  globalThis.fetch = ((_url: string, init?: RequestInit) => fetchUntilAbort(init)) as typeof fetch
   try {
     await assert.rejects(unary("https://example.test", "aiserver.v1.AiService/AvailableModels", TOKEN, {}, 30))
   } finally {
@@ -34,10 +51,20 @@ test("aborting a model refresh stops the request and does not keep the catalog",
   globalThis.fetch = ((url: string, init?: RequestInit) => {
     if (init?.signal) signals.push(init.signal)
     return new Promise((resolve, reject) => {
-      init?.signal?.addEventListener("abort", () => {
-        reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))
+      const hold = setTimeout(() => reject(aborted()), 5_000)
+      const fail = () => {
+        clearTimeout(hold)
+        reject(aborted())
+      }
+      if (init?.signal?.aborted) {
+        fail()
+        return
+      }
+      init?.signal?.addEventListener("abort", fail, { once: true })
+      finish.push(() => {
+        clearTimeout(hold)
+        resolve(catalog(String(url)))
       })
-      finish.push(() => resolve(catalog(String(url))))
     })
   }) as typeof fetch
   const ac = new AbortController()
