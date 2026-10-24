@@ -47,6 +47,27 @@ test("a failed refresh does not return another credential's catalog", async () =
       second.map((model) => model.id),
       [],
     )
+    const ac = new AbortController()
+    let started = false
+    globalThis.fetch = ((_url: string, init?: RequestInit) => {
+      started = true
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))
+        })
+      })
+    }) as typeof fetch
+    const pending = refresh(ctx(TOKEN_A, true, ac.signal))
+    const began = Date.now()
+    while (!started && Date.now() - began < 2_000) await new Promise((resolve) => setTimeout(resolve, 10))
+    ac.abort()
+    await pending
+    globalThis.fetch = (async () => new Response("no", { status: 500 })) as typeof fetch
+    const after = await refresh(ctx(TOKEN_A, true))
+    assert.deepEqual(
+      after.map((model) => model.id),
+      first.map((model) => model.id),
+    )
   } finally {
     globalThis.fetch = original
   }
