@@ -6,6 +6,7 @@
  * A native Run in this process stays open and takes call_cursor_ results.
  * This does not register a parked bridge, a checkpoint, or a run journal.
  */
+import { createHash } from "node:crypto"
 import type { RefreshModelsContext } from "@earendil-works/pi-ai"
 import type { ExtensionAPI, ProviderModelConfig } from "@earendil-works/pi-coding-agent"
 import { login, refresh, resolveAccessToken } from "./auth.ts"
@@ -16,19 +17,32 @@ import { fetchUsage, formatUsage } from "./usage.ts"
 
 export { fetchUsage, formatUsage, onDemandOf } from "./usage.ts"
 
-let models: ProviderModelConfig[] = []
+const catalogs = new Map<string, ProviderModelConfig[]>()
+
+function credentialKey(token: string): string {
+  return createHash("sha256").update(token).digest("hex")
+}
+
+function tokenFrom(ctx: RefreshModelsContext): string | undefined {
+  if (ctx.credential?.type === "oauth") return ctx.credential.access
+  if (ctx.credential?.type === "api_key") return ctx.credential.key
+  return undefined
+}
 
 async function refreshModels(ctx: RefreshModelsContext): Promise<ProviderModelConfig[]> {
-  if (ctx.signal.aborted || !ctx.allowNetwork) return models
-  const fromCred =
-    ctx.credential?.type === "oauth" ? ctx.credential.access : ctx.credential?.type === "api_key" ? ctx.credential.key : undefined
-  const auth = await resolveAccessToken({ apiKey: fromCred })
-  if (!auth) return models
+  const hinted = tokenFrom(ctx)
+  const auth = ctx.signal.aborted ? undefined : await resolveAccessToken({ apiKey: hinted })
+  const token = auth?.token ?? hinted
+  const kept = () => (token ? (catalogs.get(credentialKey(token)) ?? []) : [])
+  if (ctx.signal.aborted || !ctx.allowNetwork || !auth) return kept()
+  const key = credentialKey(auth.token)
   try {
-    models = piModelConfigs(await usable(auth.token, ctx.force === true, ctx.signal)) as ProviderModelConfig[]
-    return models
+    const next = piModelConfigs(await usable(auth.token, ctx.force === true, ctx.signal)) as ProviderModelConfig[]
+    if (ctx.signal.aborted) return catalogs.get(key) ?? []
+    catalogs.set(key, next)
+    return next
   } catch {
-    return models
+    return catalogs.get(key) ?? []
   }
 }
 
@@ -38,7 +52,7 @@ export default function (pi: ExtensionAPI) {
     baseUrl: AGENT,
     apiKey: "$CURSOR_ACCESS_TOKEN",
     api: "cursor-run",
-    models,
+    models: [],
     oauth: {
       name: "Cursor",
       isSubscription: true,
@@ -74,7 +88,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Cursor is not signed in (${version}). Run /login cursor or set CURSOR_ACCESS_TOKEN.${extra}`, "warning")
         return
       }
-      let ids = models.map((m) => m.id)
+      let ids = (catalogs.get(credentialKey(auth.token)) ?? []).map((m) => m.id)
       if (!ids.length) {
         try {
           ids = (await usable(auth.token, false, ctx.signal)).map((m: { id: string }) => m.id)
