@@ -5,7 +5,7 @@
  * Ported from magpie's native-session.mjs (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  * Self-contained. The only import is node:crypto. Run wiring passes pb, exec,
- * usageOf, and failure in. This file does not import the rest of the package.
+ * usageOf, failure, and trace in. This file does not import the rest of the package.
  */
 import { createHash, randomBytes } from "node:crypto"
 
@@ -352,12 +352,48 @@ class Segment {
   }
 }
 
+/** States an owner in entries can be in. fail() removes an owner as it sets failed, cancelled, or expired. */
+export type OwnerPhase = "opening" | "running" | "submitting" | "awaiting-results" | "finalizing" | "complete"
+
+export type OwnerView = {
+  phase: OwnerPhase
+  model: string
+  maxMode: boolean
+  /** Tool batches handed back to the caller. */
+  rounds: number
+  /** The Run's absolute lifetime deadline. */
+  lifetimeEnds: number
+  /** Whether the owner belongs to the account the reader asked about. */
+  current: boolean
+}
+
+/** The pool in a form the doctor may print. */
+export type NativeState = {
+  owners: readonly OwnerView[]
+  limits: { perAccount: number; perProcess: number }
+}
+
 export class NativeSessionPool {
   constructor(limits = NATIVE_LIMITS) {
     this.limits = limits
     this.entries = new Set()
     this.handles = new Map()
     this.selectors = new Map()
+  }
+  // Takes anything with Account's is(), so this file imports nothing. Unlike
+  // prepare, create, and response(), it changes no owner.
+  state(account?: { is(fingerprint: string): boolean }): NativeState {
+    return {
+      owners: [...this.entries].sort((a, b) => a.expiresAt - b.expiresAt).map((owner) => ({
+        phase: owner.state,
+        model: owner.resolution?.id ?? "",
+        maxMode: !!owner.resolution?.maxMode,
+        rounds: owner.segments,
+        lifetimeEnds: owner.expiresAt,
+        current: !!account?.is(owner.account),
+      })),
+      limits: { perAccount: this.limits.perAccount, perProcess: this.limits.perProcess },
+    }
   }
   // selector is conversationID(chat, session): session/cache key AND first
   // user identity. Task subagents sharing a session must not own its parent.
@@ -401,7 +437,7 @@ export class NativeSessionPool {
         return { owner, batch, results, encoded, digest, chat }
       } catch (e) {
         if (!(e instanceof NativeSessionError)) throw e
-        return fallback("history incompatible with retained owner")
+        return { fallback: "history incompatible with retained owner", detail: e.message }
       }
     }
     // Pending ancestors, new input, and terminal old handles are ordinary
@@ -411,19 +447,20 @@ export class NativeSessionPool {
     return { account, selector, controls, selected: !!selector, chat }
   }
   create(prepared, resolution, wire) {
-    if (prepared.fallback || prepared.selected && this.selectors.has(prepared.account + ":" + prepared.selector)) return null
+    if (prepared.fallback) return prepared
+    if (prepared.selected && this.selectors.has(prepared.account + ":" + prepared.selector)) return { fallback: "owner busy" }
     const crowded = () => this.entries.size >= this.limits.perProcess || [...this.entries].filter((e) => e.account === prepared.account).length >= this.limits.perAccount
     while (crowded()) {
       const accountFull = [...this.entries].filter((e) => e.account === prepared.account).length >= this.limits.perAccount
       const finished = [...this.entries].find((e) => ["complete", "failed", "cancelled", "expired"].includes(e.state) && (!accountFull || e.account === prepared.account))
-      if (!finished) return null
+      if (!finished) return { fallback: accountFull ? "account owner limit" : "process owner limit" }
       this.forget(finished)
     }
     let owner
     try { owner = new NativeSession(this, prepared, resolution, wire) }
     catch (e) {
       if (!(e instanceof NativeSessionError)) throw e
-      return null
+      return { fallback: "opening history not retainable", detail: e.message }
     }
     this.entries.add(owner)
     if (prepared.selected) this.selectors.set(owner.account + ":" + owner.selector, owner)
@@ -524,6 +561,7 @@ class NativeSession {
     if (this.error || this.state === "complete") return
     this.error = error
     this.state = state
+    this.wire.trace?.note("owner-ended", { state, model: this.resolution?.id, error })
     this.segment.fail(error)
     for (const segment of this.batches ?? []) segment.detach?.()
     this.segment.detach?.()

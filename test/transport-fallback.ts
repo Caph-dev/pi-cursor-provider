@@ -2,11 +2,13 @@ import assert from "node:assert/strict"
 import { EventEmitter } from "node:events"
 import http2 from "node:http2"
 import test, { mock } from "node:test"
-import { onH1, resetH1, runAnswer } from "../src/run.ts"
+import { resetH1, runAnswer, runState } from "../src/run.ts"
+
+const sticky = () => runState(undefined).transport.via === "h1"
 
 test("resetH1 clears sticky HTTP/1.1 preference", () => {
   resetH1()
-  assert.equal(onH1(), false)
+  assert.equal(sticky(), false)
 })
 
 const TOKEN = "transport-token-transport"
@@ -74,7 +76,7 @@ test("HTTP/2 sticks only when the failure is HTTP/2 itself", async () => {
   for (const item of cases) {
     resetH1()
     const first = await attempt(item.fail)
-    assert.equal(onH1(), item.sticky, item.name)
+    assert.equal(sticky(), item.sticky, item.name)
     assert.equal(first.connects, 1, item.name)
     assert.ok(first.fetches > 0, item.name)
     const second = await attempt(item.fail)
@@ -120,7 +122,7 @@ test("aborting a turn that fell back to HTTP/1.1 settles without another HTTP/2 
     ])
     assert.equal(raced, "settled")
     assert.equal(connects, 1)
-    assert.equal(onH1(), false)
+    assert.equal(sticky(), false)
   } finally {
     globalThis.fetch = original
     mock.restoreAll()

@@ -27,6 +27,7 @@ import { canRead, ledger, owe, STEP_WAIT, usageKey } from "./ledger.ts"
 import { recall, store, tokenKey } from "./cache.ts"
 import { request as resolveModel, usable } from "./models.ts"
 import { NATIVE_LIMITS, NativeSessionError, nativeFields, nativeMcpArgs, nativeSessions } from "./native-session.ts"
+import { hostOf, trace, type Account, type Host } from "./trace.ts"
 
 const NO_RESULT = "Tool use was interrupted and did not produce a result."
 
@@ -309,6 +310,7 @@ export async function agentURL(tok, fresh, signal?: AbortSignal) {
   if (!fresh && had) return had.url
   let url = AGENT
   let listed = false
+  let error
   try {
     const cfg = await unary(API, "aiserver.v1.ServerConfigService/GetServerConfig", tok, {}, 10_000, signal)
     for (const raw of [cfg?.agentUrlConfig?.agentUrl, cfg?.agentUrlConfig?.agentnUrl]) {
@@ -323,10 +325,13 @@ export async function agentURL(tok, fresh, signal?: AbortSignal) {
     }
   } catch (e) {
     if (signal?.aborted) throw e
+    error = e
   }
   if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
   // A refresh that learns nothing must not replace a regional URL with the global one.
-  if (!listed && fresh && had?.url) return had.url
+  const kept = !listed && fresh && !!had?.url
+  trace?.note("endpoint", { url: kept ? had.url : url, listed, kept, error })
+  if (kept) return had.url
   store(endpoints, key, { url, listed, expires: 0 }, listed ? ENDPOINT_TTL : ENDPOINT_MISS_TTL)
   return url
 }
@@ -525,7 +530,9 @@ async function open(base, headers, signal, connect = defaultConnect, headerWaitM
   if (signal?.aborted) return cancelledOpen()
   // Injected connect (tests): HTTP/2 only, keep the caller's header wait.
   if (connect !== defaultConnect) {
-    return openH2(base, headers, signal, connect, headerWaitMs)
+    const o = await openH2(base, headers, signal, connect, headerWaitMs)
+    if (!o.error) trace?.note("transport", { url: base, h1: false })
+    return o
   }
   if (Date.now() >= h1Until) {
     const o = await openH2(base, headers, signal, defaultConnect, headerWaitMs)
@@ -534,15 +541,46 @@ async function open(base, headers, signal, connect = defaultConnect, headerWaitM
       try { o.session?.destroy?.() } catch {}
       return cancelledOpen()
     }
-    if (!o.h2Failed) return o
+    if (!o.h2Failed) {
+      trace?.note("transport", { url: base, h1: false })
+      return o
+    }
     if (o.blocked) h1Until = Date.now() + H2.retryAfter
-  }
+    trace?.note("transport", { url: API, h1: true, h2: { url: base, error: o.error }, until: o.blocked ? h1Until : undefined })
+  } else trace?.note("transport", { url: API, h1: true, until: h1Until })
   if (signal?.aborted) return cancelledOpen()
   return openH1(headers, signal)
 }
 
 export function resetH1() { h1Until = 0 }
-export function onH1() { return Date.now() < h1Until }
+
+/** What run.ts keeps between turns, in a form the doctor may print. */
+export type RunState = {
+  transport: { via: "h2" } | { via: "h1"; until: number }
+  /** This account's agent host. null before a turn asked, after the entry expired, or without an account. */
+  agent: { host: Host; source: "server-config" | "global-fallback"; until: number } | null
+  /** Live agent hosts cached for other accounts. */
+  otherAgents: number
+  /** Models Cursor said need max mode. Later turns ask for it. */
+  maxModeForced: readonly string[]
+}
+
+// Walks endpoints without recall(), which deletes the expired entries this skips.
+export function runState(account: Account | undefined, now = Date.now()): RunState {
+  let agent = null
+  let otherAgents = 0
+  for (const [key, entry] of endpoints) {
+    if (now >= entry.expires) continue
+    if (account?.is(key)) agent = { host: hostOf(entry.url), source: entry.listed ? "server-config" : "global-fallback", until: entry.expires }
+    else otherAgents++
+  }
+  return {
+    transport: now < h1Until ? { via: "h1", until: h1Until } : { via: "h2" },
+    agent,
+    otherAgents,
+    maxModeForced: [...maxOnly].sort(),
+  }
+}
 
 // decode follows the server's messages into the answer's pieces until the
 // turn ends, or the model has made its tool calls. stepUsage / owedUsage are
@@ -879,12 +917,16 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   send(first)
   if (o.status < 200 || o.status > 299) {
     const chunks = []
+    let bodyCut = false
     try {
       for await (const c of req) chunks.push(c)
-    } catch {}
+    } catch {
+      bodyCut = true
+    }
     close()
     book.done()
-    return { error: failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)), h1: !!o.h1 }
+    const error = failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20))
+    return { error: bodyCut ? { ...error, bodyCut } : error, h1: !!o.h1 }
   }
   const it = decode(frames(req), {
     send,
@@ -1163,25 +1205,7 @@ export function clearMaxOnly() {
 export { nativeSessions } from "./native-session.ts"
 export { STEP_WAIT, ledger, owed, misses, unreadable, clearLedger, usageKey } from "./ledger.ts"
 
-/** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
-export async function runAnswer({
-  tok,
-  model,
-  effort = "",
-  fast,
-  messages,
-  tools = [],
-  session = "",
-  signal,
-  connect,
-  resolveAgentURL = agentURL,
-  rawModels,
-  onResponse,
-  onPayload,
-  headers,
-  headerWaitMs = H2.wait,
-  toolIdleMs = TOOL_IDLE_MS,
-}: {
+export type RunAnswerOptions = {
   tok: string
   model?: string
   effort?: string
@@ -1198,7 +1222,9 @@ export async function runAnswer({
   headers?: Record<string, string | null | undefined>
   headerWaitMs?: number
   toolIdleMs?: number
-}): Promise<{
+}
+
+export type RunAnswerResult = {
   error?: { status?: number; message?: string }
   conversationId?: string
   events?: AsyncIterable<{
@@ -1214,7 +1240,37 @@ export async function runAnswer({
     }
     error?: { status?: number; message?: string }
   }>
-}> {
+}
+
+/** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
+export async function runAnswer(opts: RunAnswerOptions): Promise<RunAnswerResult> {
+  const t = trace
+  if (!t) return answer(opts)
+  return t.within({ token: opts.tok, model: opts.model }, async () => {
+    const ran = await answer(opts)
+    if (ran.error && !opts.signal?.aborted) t.note("failed", { error: ran.error })
+    return ran.events ? { ...ran, events: t.carry(ran.events) } : ran
+  })
+}
+
+async function answer({
+  tok,
+  model,
+  effort = "",
+  fast,
+  messages,
+  tools = [],
+  session = "",
+  signal,
+  connect,
+  resolveAgentURL = agentURL,
+  rawModels,
+  onResponse,
+  onPayload,
+  headers,
+  headerWaitMs = H2.wait,
+  toolIdleMs = TOOL_IDLE_MS,
+}: RunAnswerOptions): Promise<RunAnswerResult> {
   const chat = {
     model,
     messages,
@@ -1236,6 +1292,7 @@ export async function runAnswer({
     try {
       const conv = conversation(chat, listed)
       const resumed = prepared.owner.resume({ ...prepared, estimate: conv.estimate }, signal)
+      trace?.note("native", { path: "resumed" })
       return { conversationId: convID, events: withDelivery(prepared.owner, resumed.events) }
     } catch (e) {
       return { error: { status: e?.status ?? 502, message: e?.message ?? String(e) } }
@@ -1256,10 +1313,15 @@ export async function runAnswer({
   const conv = conversation(chat, listed)
   let base = await resolveAgentURL(tok, false, signal)
   const once = async () => {
-    const native = prepared.fallback ? null : nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure })
+    const made = nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure, trace })
+    const native = made.fallback ? null : made
+    trace?.note("native", native ? { path: "created" } : { path: "declined", fallback: made.fallback, detail: made.detail })
     const args = { tok, base, id, tools: listed, conv, convID, signal, maxMode, params, connect, onResponse, onPayload, headers, headerWaitMs, toolIdleMs }
     let response = native ? await runNative({ ...args, native }) : await runOnce(args)
-    if (response.error?.retentionIneligible && !signal?.aborted) response = await runOnce(args)
+    if (response.error?.retentionIneligible && !signal?.aborted) {
+      trace?.note("native", { path: "abandoned", error: response.error })
+      response = await runOnce(args)
+    }
     return response
   }
   let ran = await once()
@@ -1268,13 +1330,16 @@ export async function runAnswer({
     resetH1()
     const fresh = await resolveAgentURL(tok, true, signal)
     const viaH1 = !!ran.h1
-    if ((fresh !== base || viaH1) && !signal?.aborted) {
+    const again = (fresh !== base || viaH1) && !signal?.aborted
+    trace?.note("retry", { rule: "region", error: ran.error, to: again ? fresh : undefined, cancelled: !!signal?.aborted })
+    if (again) {
       base = fresh
       ran = await once()
     }
   }
   if (signal?.aborted) return ran
   if (ran.error && !maxMode && maxRequired(ran.error.message)) {
+    trace?.note("retry", { rule: "max-mode", error: ran.error, model: id })
     maxMode = true
     maxOnly.add(id)
     ran = await once()

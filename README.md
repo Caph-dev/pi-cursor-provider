@@ -147,6 +147,22 @@ The stateless path still cancels the stream after tools. The native path does no
 - A regional refusal refreshes GetServerConfig and retries once when the agent URL changed (or the failed attempt was already on HTTP/1.1). That refresh clears the HTTP/1.1 stickiness so the region's agent host can use HTTP/2 again.
 - "Max Mode Required" retries once with Max Mode and remembers that model id for the process.
 
+## Doctor
+
+`/cursor.doctor` shows what this process holds for Cursor. The report has these lines.
+
+- The credential source and the client version. The token is never shown.
+- The models `cursor.json` hides.
+- The transport, HTTP/2 or HTTP/1.1. After HTTP/2 fails on this network, Runs stay on HTTP/1.1 until the time shown.
+- This account's agent host, without its path, and when GetServerConfig is asked again.
+- Max-mode models this process learned.
+- Native owners. Each line gives the state, model, tool rounds, and lifetime deadline, and says whether the owner belongs to this account. Complete owners kept for replay are listed too.
+- The usage ledger, as counts of Runs owed, usage misses in a row, and accounts whose usage events Cursor refuses.
+
+"This account" is the token `/cursor.doctor` resolves, the same way `/cursor.usage` does. The doctor does not refresh OAuth. A token near expiry may be refreshed by the next turn, so until then the doctor can name the account that token had. Every time is UTC, written `HH:MM:SSZ`. No line holds a token, an authorization header, or a hash of a token. Reading the report changes nothing and sends no request.
+
+Start Pi with `CURSOR_DEBUG=1` to keep a decision journal. The doctor then lists the last 16 turns, oldest first, with what each turn decided. That covers the agent host lookup, HTTP/2 or HTTP/1.1, whether the turn went native and why not, why a native owner ended, region and max-mode retries, why the turn failed, and usage reads that failed or were refused. A decision that repeats shows once with a count. A turn keeps 32 decisions and counts the rest. The journal lives in memory. Nothing is written to the terminal, a file, or the session. Without the variable nothing is recorded. Pi reads `CURSOR_DEBUG` at startup, and `0`, `false`, `off`, and `no` leave the journal off.
+
 ## Known gaps
 
 Compared with magpie [`packages/cursor`](https://github.com/magpie-community/plugins/tree/main/packages/cursor), this package still does not include:

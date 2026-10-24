@@ -11,7 +11,8 @@ import type { Model, Provider } from "@earendil-works/pi-ai"
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
 import { login, refresh, resolveAccessToken } from "./auth.ts"
 import { AGENT, clientVersion } from "./client.ts"
-import { configPath, hiddenPatterns, visible } from "./config.ts"
+import { hiddenPatterns, visible } from "./config.ts"
+import { registerCursorDoctor } from "./doctor.ts"
 import { piModelConfigs, usable } from "./models.ts"
 import { registerCursorFast } from "./fast.ts"
 import { fetchUsage, formatUsage } from "./usage.ts"
@@ -137,21 +138,7 @@ export default function (pi: ExtensionAPI) {
     if (error && ctx.hasUI) ctx.ui.notify(`Cursor model catalogue: ${error.message}`, "warning")
   })
 
-  pi.registerCommand("cursor.doctor", {
-    description: "Show which Cursor credential would be used, without printing the token",
-    handler: async (args, ctx) => {
-      const extra = args.trim() ? " This command does not take arguments." : ""
-      const auth = await resolveAccessToken()
-      const version = await clientVersion()
-      const patterns = hiddenPatterns()
-      const hiddenText = patterns.length ? `Hidden from /model: ${patterns.join(", ")} (${configPath()}).` : `No models hidden (${configPath()}).`
-      if (!auth) {
-        ctx.ui.notify(`Cursor is not signed in (${version}). Run /login cursor or set CURSOR_ACCESS_TOKEN. ${hiddenText}${extra}`, "warning")
-        return
-      }
-      ctx.ui.notify(`Cursor auth source: ${auth.source}. Client ${version}. ${hiddenText} Token not shown.${extra}`, "info")
-    },
-  })
+  registerCursorDoctor(pi)
 
   pi.registerCommand("cursor.usage", {
     description: "Show Cursor plan usage for this billing period",
