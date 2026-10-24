@@ -25,7 +25,7 @@ async function refreshModels(ctx: RefreshModelsContext): Promise<ProviderModelCo
   const auth = await resolveAccessToken({ apiKey: fromCred })
   if (!auth) return models
   try {
-    models = piModelConfigs(await usable(auth.token, ctx.force === true)) as ProviderModelConfig[]
+    models = piModelConfigs(await usable(auth.token, ctx.force === true, ctx.signal)) as ProviderModelConfig[]
     return models
   } catch {
     return models
@@ -77,13 +77,13 @@ export default function (pi: ExtensionAPI) {
       let ids = models.map((m) => m.id)
       if (!ids.length) {
         try {
-          ids = (await usable(auth.token)).map((m: { id: string }) => m.id)
+          ids = (await usable(auth.token, false, ctx.signal)).map((m: { id: string }) => m.id)
         } catch {
           ids = []
         }
       }
       try {
-        const report = await fetchUsage(auth.token, ids)
+        const report = await fetchUsage(auth.token, ids, ctx.signal)
         ctx.ui.notify(formatUsage(report) + extra, report.error ? "warning" : "info")
       } catch (e) {
         ctx.ui.notify(`Cursor usage could not be read. ${e instanceof Error ? e.message : String(e)}${extra}`, "warning")

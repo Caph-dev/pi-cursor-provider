@@ -71,13 +71,14 @@ export async function headersFor(tok) {
   }
 }
 
-/** Connect unary call in JSON. */
-export async function unary(base, path, tok, body = {}, timeout = 15_000) {
+/** Connect unary call in JSON. `signal` aborts the request. `timeout` still does. */
+export async function unary(base, path, tok, body = {}, timeout = 15_000, signal?: AbortSignal) {
+  const deadline = AbortSignal.timeout(timeout)
   const res = await fetch(base + "/" + path, {
     method: "POST",
     headers: await headersFor(tok),
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(timeout),
+    signal: signal ? AbortSignal.any([deadline, signal]) : deadline,
   })
   const text = await res.text()
   if (!res.ok) {
