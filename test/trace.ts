@@ -90,18 +90,19 @@ function end(json = "") {
   return last
 }
 
-/** A local h2c server. Each Run gets reply's frames once the client has sent its first message. */
-async function cursor(reply: () => Buffer[], delayMs = 0): Promise<(origin: string) => unknown> {
+/** A local h2c server. Each Run gets reply's bytes once the client has sent its first message. cut resets the stream after them. */
+async function cursor(reply: () => Buffer[], { status = 200, delayMs = 0, cut = false } = {}): Promise<(origin: string) => unknown> {
   const server = http2.createServer()
   const sessions = new Set<http2.Http2Session>()
   server.on("session", (session) => sessions.add(session))
   server.on("stream", (stream) => {
     stream.on("error", () => {})
-    stream.respond({ ":status": 200 })
+    stream.respond({ ":status": status })
     stream.once("data", async () => {
       await later(delayMs)
       for (const f of reply()) stream.write(f)
-      stream.end()
+      if (cut) stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR)
+      else stream.end()
     })
   })
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve))
@@ -271,6 +272,7 @@ test("the doctor shows why a native owner ended, which fail() forgets", async ()
     "    native: created",
     "    run: h2 to a.example",
     "    owner ended: failed, composer-test (overloaded)",
+    "    failed (503, overloaded)",
   ])
 })
 
@@ -294,4 +296,26 @@ test("CURSOR_DEBUG keeps region and max-mode retry reasons and the doctor prints
   assert.match(turnLines(report, 1).join("\n"), /^ {4}region error \(502, not in this region\)\. Retried on b\.example\.$/m)
   assert.match(turnLines(report, 2).join("\n"), /^ {4}region error \(502, not in this region\)\. Not retried because the agent host did not change and the Run used HTTP\/2\.$/m)
   assert.match(turnLines(report, 3).join("\n"), /^ {4}max mode required for composer-max \(502, Max Mode required\)\. Retried with max mode\.$/m)
+})
+
+test("the doctor shows a failed turn's reason without the token, its fingerprint, a bearer header, or a URL path", async () => {
+  journal()
+  await answer({
+    connect: () => {
+      throw new Error(`Bearer ${TOKEN} rejected at https://a.example/agent/secret-path`)
+    },
+  })
+  const report = await doctor()
+  assert.match(turnLines(report, 1).join("\n"), /^ {4}failed \(502, Bearer \[token\] rejected at a\.example\)$/m)
+  for (const leak of [TOKEN, tokenKey(TOKEN).slice(0, 8), `Bearer ${TOKEN.slice(0, 6)}`, "/secret-path"]) {
+    assert.equal(report.includes(leak), false, leak)
+  }
+})
+
+test("the doctor says when a failed Run's error body was cut short", async () => {
+  journal()
+  const connect = await cursor(() => [Buffer.from('{"error":{"code":"internal","message":"bro')], { status: 500, cut: true })
+  const ran = await answer({ connect, messages: historical })
+  assert.equal(ran.error?.status, 500)
+  assert.match(turnLines(await doctor(), 1).join("\n"), /^ {4}failed \(500, .*\), error body cut short$/m)
 })

@@ -913,12 +913,16 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   send(first)
   if (o.status < 200 || o.status > 299) {
     const chunks = []
+    let bodyCut = false
     try {
       for await (const c of req) chunks.push(c)
-    } catch {}
+    } catch {
+      bodyCut = true
+    }
     close()
     book.done()
-    return { error: failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20)), h1: !!o.h1 }
+    const error = failure(o.status, Buffer.concat(chunks).toString("utf8").slice(0, 1 << 20))
+    return { error: bodyCut ? { ...error, bodyCut } : error, h1: !!o.h1 }
   }
   const it = decode(frames(req), {
     send,
@@ -1240,6 +1244,7 @@ export async function runAnswer(opts: RunAnswerOptions): Promise<RunAnswerResult
   if (!t) return answer(opts)
   return t.within({ token: opts.tok, model: opts.model }, async () => {
     const ran = await answer(opts)
+    if (ran.error && !opts.signal?.aborted) t.note("failed", { error: ran.error })
     return ran.events ? { ...ran, events: t.carry(ran.events) } : ran
   })
 }
