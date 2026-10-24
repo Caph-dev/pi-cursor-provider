@@ -85,8 +85,12 @@ function toolsOf(chat) {
 // those calls went nowhere (#11).
 function catalog(tools) {
   if (!tools.length) return ""
+  const visible = (value) => String(value ?? "").replaceAll("<", "\\u003c")
   let s = `\n\n<dynamic_tool_catalog>\nThe MCP namespace "pi" has the tools below. They are reached only through \`${CALL}\`, never as tools of their own. Each entry is the exact call to make; its arguments must match the schema given. The schemas are complete, so there is no need to call \`GetDynamicTools\` first.\n`
-  for (const t of tools) s += `<call>${CALL}({"namespace":"${NAMESPACE}","toolName":"${t.name}","arguments":{...}})\n${t.description}\narguments schema: ${t.schemaText}\n</call>\n`
+  for (const t of tools) {
+    const name = JSON.stringify(String(t.name ?? "")).replaceAll("<", "\\u003c")
+    s += `<call>${CALL}({"namespace":"${NAMESPACE}","toolName":${name},"arguments":{...}})\n${visible(t.description)}\narguments schema: ${visible(t.schemaText)}\n</call>\n`
+  }
   return s + "</dynamic_tool_catalog>"
 }
 
