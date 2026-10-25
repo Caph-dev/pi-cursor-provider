@@ -401,7 +401,6 @@ function openH2(base, headers, signal, connect = defaultConnect, headerWaitMs = 
       () => fail(Object.assign(new Error(`no answer over HTTP/2 in ${(Number.isFinite(wait) && wait > 0 ? wait : H2.wait) / 1000}s`), { h2Timeout: true })),
       Number.isFinite(wait) && wait > 0 ? wait : H2.wait,
     )
-    const closed = () => fail(Object.assign(new Error("the connection closed"), { code: "ERR_HTTP2_STREAM_ERROR" }))
     session.on("error", fail)
     const req = session.request({
       ":method": "POST",
@@ -771,7 +770,7 @@ const bareName = (s) => {
   return s
 }
 
-function exec(msg, tools, send, closeExec, refused, native = false) {
+function exec(msg, tools, send, closeExec, native = false) {
   const es = native ? nativeFields(msg) : fields(msg)
   if (native && es.some((e) => e.num === 1 && (e.wire !== 0 || !Number.isInteger(e.n) || e.n < 0 || e.n > 0xffffffff)))
     throw new NativeSessionError(502, "invalid native exec request ID")
@@ -797,8 +796,6 @@ function exec(msg, tools, send, closeExec, refused, native = false) {
     closeExec(id)
   }
   const unavailable = () => {
-    const kind = es.find((e) => ![1, 15, 19, 55].includes(e.num))?.num ?? 0
-    refused?.set(kind, (refused.get(kind) ?? 0) + 1)
     send(pb().bytes(5, pb().bytes(2, pb().varint(1, id).str(2, "not available"))).done())
     closeExec(id)
     return null
