@@ -185,7 +185,7 @@ npm test
 CURSOR_E2E=1 npm run test:e2e
 ```
 
-`npm test` stays off the Cursor network (fetch is mocked where the dashboard is involved). `npm run test:e2e` hits a real Cursor account (cursor-agent `auth.json`, `CURSOR_ACCESS_TOKEN`, or `/login cursor`) and never prints the token. The checker reads `client.ts`. `codec.ts`, `ledger.ts`, `models.ts`, `native-session.ts`, and `run.ts` still keep their `// @ts-nocheck` magpie-port headers.
+`npm test` stays off the Cursor network (fetch is mocked where the dashboard is involved). `npm run test:e2e` hits a real Cursor account (cursor-agent `auth.json`, `CURSOR_ACCESS_TOKEN`, or `/login cursor`) and never prints the token. The checker reads `client.ts` and `run.ts`. `codec.ts`, `ledger.ts`, `models.ts`, and `native-session.ts` still keep their `// @ts-nocheck` magpie-port headers.
 
 The renewal grant is checked against the real service: `POST api2.cursor.sh/oauth/token` answered with a new access token, and that token listed models, read usage, and completed a Run. `npm test` covers the request shape, the rotation, and the failures offline; how the server itself answers still needs a live check.
 

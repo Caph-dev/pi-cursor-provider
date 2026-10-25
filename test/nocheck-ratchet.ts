@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 
 const src = fileURLToPath(new URL("../src/", import.meta.url))
 
-const UNCHECKED = ["codec.ts", "ledger.ts", "models.ts", "native-session.ts", "run.ts"]
+const UNCHECKED = ["codec.ts", "ledger.ts", "models.ts", "native-session.ts"]
 
 test("@ts-nocheck files stay on the allowlist", () => {
   const found = readdirSync(src)

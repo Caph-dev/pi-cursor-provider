@@ -936,7 +936,7 @@ class NativeSession {
               }
               break
             case 2: {
-              const c = exec(m.data, this.chatTools, (b) => this.send(b), (id) => this.execClose(id), null, true)
+              const c = exec(m.data, this.chatTools, (b) => this.send(b), (id) => this.execClose(id), true)
               if (c) this.acceptCall(c)
               // request_context is Cursor asking for the environment, not a call
               else if (!nativeFields(m.data).some((e) => e.num === 10)) this.answeredCall()
