@@ -1,11 +1,7 @@
 /**
- * Pi's chat as Cursor AgentService/Run messages, and a Run's messages back as events.
- *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  * which itself was ported from magpie's Go client (internal/provider/cursor*.go).
- *
- * Nothing here outlives a Run. A Run's blobs live in the BlobStore its request made.
  */
 import { createHash, randomBytes, randomUUID } from "node:crypto"
 import { isDeepStrictEqual } from "node:util"
@@ -16,13 +12,10 @@ import { NativeSessionError, nativeFields, nativeMcpArgs } from "./native-sessio
 /** A tool decode and exec accept. schemaText may be absent. A missing one stays missing. */
 export type ExecTool = { name: string; description?: string; schema?: unknown; schemaText?: string }
 
-/** A caller tool as the model sees it. schemaText is the schema's JSON, written once. */
 export type ChatTool = { name: string; description: string; schema: unknown; schemaText: string }
 
-/** The conversation as AI SDK messages in JSON, the user's last words, and a prompt token estimate. */
 export type Conversation = { msgs: Buffer[]; last: string; estimate: number }
 
-/** A Run's blobs by the hex of their SHA-256. Cursor's KV reads are answered from it. */
 export type BlobStore = Map<string, Buffer>
 
 /** One frame of a Connect stream: a message, or, with end, the stream's closing JSON. */
@@ -56,10 +49,8 @@ export type RunEvent = {
   error?: RunError
 }
 
-/** A call of the caller's tools, with the id the caller answers it by. */
 export type ToolCall = { id: string; name: string; args: string }
 
-/** A call of the caller's tools on a native Run, with the exec it answers. */
 export type NativeCall = { requestID: number; execID: string; nativeID: string; name: string; args: string }
 
 /** What onPayload is shown before a Run's request is written. A model it hands back is asked for instead. */
@@ -79,7 +70,6 @@ type ChatMessage = {
 type FunctionTool = { type?: string; function?: { name?: string; description?: string; parameters?: unknown } }
 
 const NO_RESULT = "Tool use was interrupted and did not produce a result."
-// After at least one tool call, a stream that never closes must not pin the turn.
 const TOOL_IDLE_MS = 3_000
 
 const textOf = (c: unknown): string =>
@@ -115,7 +105,6 @@ function parseArgs(s: unknown): object {
   }
 }
 
-/** The caller's tools the model may call. */
 export function toolsOf(chat: { tools?: readonly FunctionTool[] }): ChatTool[] {
   return (chat.tools ?? [])
     .filter((t): t is { type: string; function: { name: string; description?: string; parameters?: unknown } } => t?.type === "function" && !!t.function?.name)
@@ -164,11 +153,6 @@ function result(id: string, text: string, isError: boolean) {
   }
 }
 
-// messages is the conversation as AI SDK messages, in JSON: the system
-// prompt with the caller's tools listed, then each turn. A tool result
-// answers a call of the reply before it; a call left unanswered is
-// answered for, as the API wants every call to have its result. With it,
-// the user's last words.
 export function conversation(chat: { messages?: readonly unknown[] }, tools: readonly ChatTool[]): Conversation {
   const messages = (chat.messages ?? []) as readonly ChatMessage[]
   const out: Buffer[] = []
@@ -198,7 +182,6 @@ export function conversation(chat: { messages?: readonly unknown[] }, tools: rea
         pending.splice(i, 1)
         const text = textOf(m.content)
         size += text.length
-        // told Cursor isError (magpie #; Pi sets isError on toolResult)
         results.push(result(id, text, m.is_error === true || m.isError === true))
       }
       continue
@@ -219,7 +202,6 @@ export function conversation(chat: { messages?: readonly unknown[] }, tools: rea
       if (content.length) add({ role: "assistant", content })
       continue
     }
-    // the user's
     const content: object[] = []
     const parts: readonly ChatPart[] = typeof m.content === "string" ? [{ type: "text", text: m.content }] : m.content ?? []
     let first = ""
@@ -246,7 +228,6 @@ export function conversation(chat: { messages?: readonly unknown[] }, tools: rea
   return { msgs: out, last, estimate: Math.floor(size / 4) }
 }
 
-// uuidOf is a version 4 UUID made of a hash's first 16 bytes.
 function uuidOf(b: Buffer): string {
   b = Buffer.from(b.subarray(0, 16))
   b[6] = (b[6] & 0x0f) | 0x40
@@ -272,9 +253,6 @@ export function conversationID(chat: { messages?: readonly unknown[] } | undefin
   return uuidOf(sum)
 }
 
-// ---- the request ---------------------------------------------------------------------
-
-// toolDef is an McpToolDefinition.
 function toolDef(t: ExecTool): Buffer {
   const d = pb().str(1, t.name)
   if (t.description) d.str(2, t.description)
@@ -332,8 +310,6 @@ export function buildRun(
   return { first: pb().bytes(1, rr).done(), blobs }
 }
 
-// ---- the reply ---------------------------------------------------------------------
-
 // usageOf is a TurnEndedUpdate as magpie counts usage, as the built-in's
 // cursorUsage has it (magpie #498). Its input_tokens is the whole prompt,
 // what was read from the cache and written to it included, as Cursor's
@@ -360,10 +336,6 @@ export type DecodeOptions = {
 
 type Next = { v: IteratorResult<Frame>; e?: undefined; idle?: undefined } | { e: unknown; v?: undefined; idle?: undefined } | { idle: true; v?: undefined; e?: undefined }
 
-// decode follows the server's messages into the answer's pieces until the
-// turn ends, or the model has made its tool calls. stepUsage / owedUsage are
-// the deferred dashboard ledger (magpie): a tool step without TurnEnded reads
-// usage events; earlier debt leaves as magpie_deferred.
 export async function* decode(
   stream: Iterable<Frame> | AsyncIterable<Frame>,
   { send, blobs, tools, estimate = 0, close, stepUsage, owedUsage, toolIdleMs = TOOL_IDLE_MS }: DecodeOptions,
@@ -410,7 +382,6 @@ export async function* decode(
     }
   }
   const settled = async () => {
-    // Stateless path: tools are full, so cancel this Run. Their results ride the next request.
     if (calls > 0 && !ended && stepUsage) {
       close?.()
       const u = await stepUsage().catch(() => null)
@@ -544,9 +515,6 @@ export async function* decode(
   }
 }
 
-// exec answers what the server asks the client to run: a call of the
-// caller's tools is returned, the list of them is given, and anything else
-// is refused.
 const NAMESPACES: readonly string[] = [NAMESPACE]
 const bareName = (s: string) => {
   for (const ns of NAMESPACES) if (s.startsWith(ns + "-")) return s.slice(ns.length + 1)

@@ -1,21 +1,10 @@
 /**
- * Which agent host serves a token.
- *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
- *
- * Process state: endpoints, each token's agent host. Nothing else writes it.
- * h1Until lives in transport.ts. This file does not import it.
  */
 import { AGENT, API, unary } from "./client.ts"
 import { recall, store, tokenKey } from "./cache.ts"
 import { hostOf, trace, type Account, type Host } from "./trace.ts"
-
-// endpoints are the agent API picked for each token (by its hash). As
-// cursor-agent does, it is what ServerConfigService/GetServerConfig names —
-// a team may be served in one region only, and the global API turns it
-// away — asked once a token, and again when fresh is set; the global one
-// while it can't be had.
 
 type Endpoint = { url: string; listed: boolean; expires: number }
 const endpoints = new Map<string, Endpoint>()
@@ -50,7 +39,6 @@ export async function agentURL(tok: string, fresh: boolean, signal?: AbortSignal
     error = e
   }
   if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
-  // A refresh that learns nothing must not replace a regional URL with the global one.
   const kept = !listed && fresh && !!had?.url
   trace?.note("endpoint", { url: kept ? had.url : url, listed, kept, error })
   if (kept) return had.url
@@ -68,7 +56,6 @@ export type AgentHit = {
   until: number
 }
 
-// Walks endpoints without recall(), which deletes the expired entries this skips.
 export function endpointView(account: Account | undefined, now: number): { agent: AgentHit | null; otherAgents: number } {
   let agent: AgentHit | null = null
   let otherAgents = 0

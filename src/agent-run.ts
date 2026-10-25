@@ -1,15 +1,6 @@
 /**
- * One Cursor AgentService/Run: open its stream, write the request, read it, then tear it down.
- *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
- *
- * The stateless Run ends when tools are returned. Pi executes them and the
- * next request carries the results as history. A native Run stays open, and a
- * later turn whose results use its call_cursor_<hex>_<seg>_<i> ids resumes it.
- * The deferred dashboard ledger counts each: a stateless tool step without
- * TurnEnded reads its usage events, and a native Run settles earlier debt
- * as magpie_deferred.
  */
 import { randomUUID } from "node:crypto"
 import http2 from "node:http2"
@@ -21,7 +12,6 @@ import { buildRun, decode, exec, usageOf, type BlobStore, type ChatTool, type Co
 import { cancelledOpen, open, type Connect, type RunStream } from "./transport.ts"
 import { trace } from "./trace.ts"
 
-/** One Run's inputs, as the turn resolved them. */
 export type RunArgs = {
   tok: string
   base: string
@@ -46,12 +36,10 @@ export type RunResult =
   | { error: RunError & { bodyCut?: boolean; retentionIneligible?: boolean }; h1?: boolean; conversationId?: undefined; events?: undefined }
   | { error?: undefined; conversationId: string; h1?: boolean; events: AsyncIterable<RunEvent> }
 
-/** What nativeSessions.prepare made of the turn's history: the native Run that asked for these tool results, or none (fallback says why a new one can't be native). */
 export type Prepared = { owner: NativeOwner } | { owner?: undefined; fallback?: string }
 
 type Thrown = { status?: number; message?: string }
 
-/** A native segment's events, as native-session.ts's Segment.iterator() makes them. */
 type SegmentEvents = {
   next(): Promise<IteratorResult<RunEvent>>
   return(): Promise<IteratorResult<RunEvent>>
@@ -72,7 +60,6 @@ type NativeAccounting = {
   abandon(): void
 }
 
-/** The NativeSession members this file drives. native-session.ts is unchecked; this is the checked side of that contract. */
 type NativeOwner = {
   accounting?: NativeAccounting
   chatTools?: readonly ChatTool[]
@@ -93,11 +80,6 @@ type NativeOwner = {
   delivered(): void
 }
 
-/**
- * One Run for the turn: native when the pool makes an owner, stateless
- * otherwise, and stateless again when Cursor's batch rules out retention
- * before any result was written to the native Run.
- */
 export async function startRun(prepared: Prepared, args: RunArgs): Promise<RunResult> {
   const { id, maxMode, params, signal } = args
   const made = nativeSessions.create(prepared, { id, maxMode, params }, { pb, exec, usageOf, failure, trace })
@@ -211,8 +193,6 @@ async function runOnce({ tok, base, id, tools, conv, convID, signal, maxMode, pa
   }
 }
 
-// withDelivery marks the sealed segment clean once the caller has its stop
-// event. The next turn can then resume. Until then prepare reports the owner busy.
 function withDelivery(owner: { delivered(): void }, events: SegmentEvents): AsyncIterableIterator<RunEvent> {
   const it = events[Symbol.asyncIterator]()
   return {
@@ -226,8 +206,6 @@ function withDelivery(owner: { delivered(): void }, events: SegmentEvents): Asyn
   }
 }
 
-// nativeTransport queues writes on one open Run. Heartbeats and exec answers
-// never wait. A KV reply waits until the queue has room.
 function nativeTransport(req: RunStream, close: () => void, fail: (e: unknown) => void, limits = NATIVE_LIMITS): NativeTransport {
   const outbound = { bytes: 0, messages: 0 }
   const queue: Buffer[] = []
@@ -327,9 +305,6 @@ function nativeTransport(req: RunStream, close: () => void, fail: (e: unknown) =
   }
 }
 
-// runNative keeps the Run open across tool batches. Accounting uses the
-// deferred dashboard ledger: settle collects earlier debt as magpie_deferred;
-// an abandoned pending Run is owed once to the same conversation.
 async function runNative({ tok, base, id, tools, conv, convID, signal, maxMode, params, native, connect, onResponse, onPayload, headers, headerWaitMs }: RunArgs & { native: NativeOwner }): Promise<RunResult> {
   const cid = convID || randomUUID()
   const since = Date.now()

@@ -1,19 +1,7 @@
 /**
- * One Pi turn against Cursor: resume the native Run that asked for these
- * tool results, or start a Run, and retry it once on a regional miss and
- * once when Cursor says the model needs max mode.
- *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
  * which itself was ported from magpie's Go client (internal/provider/cursor*.go).
- *
- * Not ported: parked HTTP/2 sessions, checkpoint resume, run journals, and the
- * OpenCode chat-completions adapter.
- *
- * protocol.ts turns chat messages into a Run and its frames into events;
- * endpoint.ts finds the agent host;
- * transport.ts opens the Run's stream;
- * agent-run.ts drives one Run, stateless or native.
  */
 import { regional } from "./codec.ts"
 import { request as resolveModel, usable } from "./models.ts"
@@ -30,7 +18,6 @@ export { resetH1 } from "./transport.ts"
 export { nativeSessions } from "./native-session.ts"
 export { STEP_WAIT, ledger, owed, misses, unreadable, clearLedger, usageKey } from "./ledger.ts"
 
-// maxOnly holds the models Cursor said need max mode. Later turns ask for it.
 const maxOnly = new Set<string>()
 const maxRequired = (msg: unknown) => /max[ _]mode[ _]required|requires max mode/i.test(String(msg ?? ""))
 
@@ -38,14 +25,11 @@ export function clearMaxOnly(): void {
   maxOnly.clear()
 }
 
-/** What run.ts keeps between turns, in a form the doctor may print. */
 export type RunState = {
   transport: { via: "h2" } | { via: "h1"; until: number }
   /** This account's agent host. null before a turn asked, after the entry expired, or without an account. */
   agent: { host: Host; source: "server-config" | "global-fallback"; until: number } | null
-  /** Live agent hosts cached for other accounts. */
   otherAgents: number
-  /** Models Cursor said need max mode. Later turns ask for it. */
   maxModeForced: readonly string[]
 }
 
@@ -91,7 +75,6 @@ export type RunAnswerResult = {
   }>
 }
 
-/** One user-visible turn. A regional miss retries once, and only when the agent URL changed. */
 export async function runAnswer(opts: RunAnswerOptions): Promise<RunAnswerResult> {
   const t = trace
   if (!t) return answer(opts)

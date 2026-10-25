@@ -1,11 +1,6 @@
 /**
- * A Run's stream to Cursor: HTTP/2, or HTTP/1.1 until h1Until.
- *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
- *
- * Process state: h1Until, the process-wide HTTP/1.1 deadline. Nothing else writes it.
- * The agent host cache lives in endpoint.ts. This file does not import it.
  */
 import { randomUUID } from "node:crypto"
 import http2 from "node:http2"
@@ -14,10 +9,8 @@ import { frame, pb } from "./codec.ts"
 import { API } from "./client.ts"
 import { trace } from "./trace.ts"
 
-/** A Run's open stream: write frames to it, read the reply's bytes from it. */
 export type RunStream = Duplex & { close(code?: number): void }
 
-/** A Run whose response headers came back. */
 export type Opened = {
   error?: undefined
   h2Failed?: undefined
@@ -51,11 +44,9 @@ export type OpenRequest = {
   signal?: AbortSignal
   connect?: Connect
   headerWaitMs?: number
-  /** The caller awaits clientVersion before it reads the abort signal this request carries. */
   version: string
 }
 
-/** What this file keeps between turns, in a form the doctor may print. */
 export type TransportState = {
   transport: { via: "h2" } | { via: "h1"; until: number }
 }
@@ -66,16 +57,6 @@ function defaultConnect(origin: string) {
   return http2.connect(origin)
 }
 
-// open starts a Run at base: the session, the stream, and the response's
-// status, or an error the request never got past. A Run HTTP/2 can't open
-// goes over HTTP/1.1 (openH1). When the failure says HTTP/2 itself can't be
-// had here (h2Blocked), the Runs after it go straight to HTTP/1.1 for
-// H2.retryAfter, or until a region error sends one back (runAnswer); a
-// connection that failed (refused, no network) or a stream the server
-// refused leaves the next Run to try HTTP/2 again.
-//
-// Tests may inject `connect`; that path stays HTTP/2-only. Both paths wait
-// headerWaitMs for response headers. The default is H2.wait.
 let h1Until = 0
 const H2 = {
   wait: 15_000,
@@ -84,7 +65,6 @@ const H2 = {
 const H1 = { appendWait: 60_000 }
 const NET = ["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "ECONNRESET", "ETIMEDOUT", "ECONNABORTED", "EPIPE"]
 
-/** What open gives back for a request that was cancelled before its Run opened. */
 export const cancelledOpen = (): OpenFailed => ({ error: { status: 410, message: "the request was cancelled" }, h2Failed: false })
 
 function h2Blocked(e: Thrown): boolean {
@@ -280,7 +260,6 @@ function openH1(headers: Record<string, string>, signal: AbortSignal | undefined
 export async function open({ base, tok, headers: extra, signal, connect = defaultConnect, headerWaitMs = H2.wait, version }: OpenRequest): Promise<Opened | OpenFailed> {
   const headers = cursorHeaders(tok, version, extra)
   if (signal?.aborted) return cancelledOpen()
-  // Injected connect (tests): HTTP/2 only, keep the caller's header wait.
   if (connect !== defaultConnect) {
     const o = await openH2(base, headers, signal, connect, headerWaitMs)
     if (!o.error) trace?.note("transport", { url: base, h1: false })
@@ -306,7 +285,6 @@ export async function open({ base, tok, headers: extra, signal, connect = defaul
 
 export function resetH1(): void { h1Until = 0 }
 
-/** The HTTP/2 or sticky HTTP/1.1 choice at now. Reads h1Until. Does not write it. */
 export function transportState(now: number): TransportState {
   return { transport: now < h1Until ? { via: "h1", until: h1Until } : { via: "h2" } }
 }
