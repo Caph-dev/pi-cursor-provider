@@ -10,7 +10,7 @@
 - Cancelling a request aborts the Connect call. A late model catalog is not cached.
 - A failed model refresh returns that credential's last catalog, or an empty list when it has none.
 - Tool names, descriptions, and schemas cannot close the catalog tags.
-- Offline tests cover assistant events, Run retries, and HTTP/2 stickiness.
+- `run.ts` is split by seam: the agent host cache is `endpoint.ts`, the HTTP/1.1 fallback is `transport.ts`, chat encoding and `exec` are `protocol.ts`, and one Run plus the turn retry is `agent-run.ts`. `run.ts` keeps `runAnswer` and is typechecked now. The unused exec refusal counter is gone.
 
 ## 0.3.0
 
