@@ -8,7 +8,7 @@
  */
 import { createHash } from "node:crypto"
 import type { Model, Provider } from "@earendil-works/pi-ai"
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent"
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { login, refresh, resolveAccessToken } from "./auth.ts"
 import { AGENT, clientVersion } from "./client.ts"
 import { hiddenPatterns, visible } from "./config.ts"
@@ -127,15 +127,69 @@ export default function (pi: ExtensionAPI) {
 
   // Startup and /reload restore cached models first. Discover the catalogue
   // for a first install too, once the host has bound credentials and context.
-  pi.on("session_start", async (_event, ctx) => {
-    const result = await ctx.modelRegistry.refresh({
+  const refreshCatalogue = (ctx: ExtensionContext, signal: AbortSignal) =>
+    ctx.modelRegistry.refresh({
       providers: ["cursor"],
       allowNetwork: process.env.PI_OFFLINE === undefined,
-      signal: AbortSignal.timeout(15_000),
+      signal,
     })
-    fast.updateStatus(ctx)
-    const error = result.errors.get("cursor")
-    if (error && ctx.hasUI) ctx.ui.notify(`Cursor model catalogue: ${error.message}`, "warning")
+
+  // Pi awaits session_start handlers one at a time, so awaiting the network
+  // round trip here holds back every extension registered later in the session:
+  // the TUI paints its built-in footer before it binds extensions, and a custom
+  // footer stays unpainted until this handler returns (measured: ~1.9 s). Run
+  // the refresh in the background there and let it publish when it lands.
+  // Headless modes keep awaiting: an RPC host reads the catalogue right after
+  // startup and has no other signal that it changed.
+  let catalogueGeneration = 0
+  let catalogueAbort: AbortController | null = null
+
+  // A new session, a reload, or a shutdown owns the registry and the status row
+  // from now on: bump the generation and stop the request the previous session
+  // started, so `refreshModels` cannot publish a catalogue for it either.
+  function retireCatalogue(): number {
+    catalogueGeneration += 1
+    catalogueAbort?.abort()
+    catalogueAbort = null
+    return catalogueGeneration
+  }
+  pi.on("session_shutdown", () => { retireCatalogue() })
+
+  pi.on("session_start", async (_event, ctx) => {
+    const generation = retireCatalogue()
+    const timeout = AbortSignal.timeout(15_000)
+    if (ctx.mode !== "tui") {
+      const result = await refreshCatalogue(ctx, timeout)
+      fast.updateStatus(ctx)
+      const error = result.errors.get("cursor")
+      if (error && ctx.hasUI) ctx.ui.notify(`Cursor model catalogue: ${error.message}`, "warning")
+      return
+    }
+    const request = new AbortController()
+    catalogueAbort = request
+    const signal = AbortSignal.any([timeout, request.signal])
+    void (async () => {
+      try {
+        const result = await refreshCatalogue(ctx, signal)
+        // The status row and the warning belong to the session that asked, and
+        // that session is gone as soon as the generation moved on.
+        if (generation !== catalogueGeneration) return
+        fast.updateStatus(ctx)
+        const error = result.errors.get("cursor")
+        if (error && ctx.hasUI) ctx.ui.notify(`Cursor model catalogue: ${error.message}`, "warning")
+      } catch (error) {
+        // Nothing awaits this task, so Pi's error listener cannot see the throw,
+        // and a superseded ctx throws as soon as it is touched.
+        if (generation !== catalogueGeneration) return
+        try {
+          if (ctx.hasUI) ctx.ui.notify(`Cursor model catalogue: ${error instanceof Error ? error.message : String(error)}`, "warning")
+        } catch {
+          // The session ended while the refresh was in flight.
+        }
+      } finally {
+        if (catalogueAbort === request) catalogueAbort = null
+      }
+    })()
   })
 
   registerCursorDoctor(pi)

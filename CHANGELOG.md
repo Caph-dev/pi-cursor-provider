@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.3
+
+- The Cursor catalogue refresh on `session_start` no longer blocks the session in the TUI. Pi paints before it binds extensions and awaits `session_start` handlers one at a time, so the network round trip left the built-in footer on screen for as long as it took — measured 1.9 s with a healthy connection, up to the 15 s timeout without one — and every extension registered after this one waited with it. The TUI path now starts the refresh in the background and publishes when it lands; a new session, a reload, or a shutdown cancels the request it replaced, so `refreshModels` cannot publish a catalogue for a session that ended, and no status or warning from it is applied. Headless modes still await it: an RPC host reads the catalogue right after startup and has no other signal that it changed.
+
 ## 0.5.2
 
 - The `cursor-fast` status is always published with `ctx.ui.setStatus`, not only when Pi's own footer is in use. A footer that renders extension statuses — including pi-ccline, which takes the only custom-footer slot on Pi 1.4 — now shows `fast: on/off/unavailable` instead of losing it. Cursor's own footer still filters that key out, so the inline badge never appears twice.
