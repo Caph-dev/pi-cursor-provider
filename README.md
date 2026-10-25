@@ -35,6 +35,8 @@ Use one of these. `/cursor.doctor` reports which source matched and does not pri
 4. macOS keychain item `cursor-access-token`.
 5. Cursor IDE state (`state.vscdb`, key `cursorAuth/accessToken`).
 
+`/login cursor` stores a Pi OAuth credential. Renewal follows the Cursor IDE: a `refresh_token` grant at `api2.cursor.sh/oauth/token` with the stored refresh token, not the access token. When Cursor ends the session, the next turn asks you to run `/login cursor` again.
+
 Then select a model:
 
 ```text
@@ -185,6 +187,8 @@ CURSOR_E2E=1 npm run test:e2e
 
 `npm test` stays off the Cursor network (fetch is mocked where the dashboard is involved). `npm run test:e2e` hits a real Cursor account (cursor-agent `auth.json`, `CURSOR_ACCESS_TOKEN`, or `/login cursor`) and never prints the token. The checker reads `client.ts`. `codec.ts`, `ledger.ts`, `models.ts`, `native-session.ts`, and `run.ts` still keep their `// @ts-nocheck` magpie-port headers.
 
+The renewal grant is checked against the real service: `POST api2.cursor.sh/oauth/token` answers with a new access token, and that token lists models, reads usage, and completes a Run. `npm test` keeps that coverage offline, so a protocol change fails a test before a release.
+
 ## License
 
-MIT. The Run protocol comes from magpie [`packages/cursor`](https://github.com/magpie-community/plugins/tree/main/packages/cursor). Login patterns follow [pi-cursor](https://github.com/Rahularya01/pi-cursor).
+MIT. The Run protocol comes from magpie [`packages/cursor`](https://github.com/magpie-community/plugins/tree/main/packages/cursor). Login patterns follow [pi-cursor](https://github.com/Rahularya01/pi-cursor). Session renewal follows [oh-my-pi](https://github.com/can1357/oh-my-pi).

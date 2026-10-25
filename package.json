@@ -1,6 +1,6 @@
 {
   "name": "@caph42/pi-cursor-provider",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Cursor provider for Pi: one HTTP/2 AgentService/Run per turn (magpie-aligned).",
   "license": "MIT",
   "repository": {

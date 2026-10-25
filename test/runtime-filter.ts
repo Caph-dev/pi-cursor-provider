@@ -16,7 +16,7 @@ const credentials: CredentialStore = {
 }
 
 async function fixture(
-  run: (runtime: ModelRuntime, dir: string, calls: string[], state: { credential?: Credential; writes: number }) => Promise<void>,
+  run: (runtime: ModelRuntime, dir: string, calls: string[], state: { credential?: Credential; writes: number; deletes: number }) => Promise<void>,
   modelsConfig?: object,
   credential?: Credential,
 ) {
@@ -30,9 +30,9 @@ async function fixture(
   writeFileSync(join(dir, "cursor.json"), JSON.stringify({ hiddenModels: [] }))
   globalThis.fetch = (async (url: string, init?: RequestInit) => {
     calls.push(String(url))
-    if (String(url).endsWith("exchange_user_api_key")) {
+    if (String(url).endsWith("/oauth/token")) {
       assert.ok(init?.signal instanceof AbortSignal, "OAuth refresh forwards its abort signal")
-      return Response.json({ accessToken: "refreshed-oauth-access-xxxxxxxxxxxxxxxxxxxx", refreshToken: "refreshed-token" })
+      return Response.json({ access_token: "refreshed-oauth-access-xxxxxxxxxxxxxxxxxxxx", refresh_token: "refreshed-token" })
     }
     return Response.json(String(url).endsWith("GetUsableModels")
       ? { models: [{ modelId: "gpt-5" }, { modelId: "claude-test" }] }
@@ -44,7 +44,7 @@ async function fixture(
   try {
     const modelsPath = modelsConfig ? join(dir, "models.json") : null
     if (modelsPath) writeFileSync(modelsPath, JSON.stringify(modelsConfig))
-    const state = { credential, writes: 0 }
+    const state = { credential, writes: 0, deletes: 0 }
     const store: CredentialStore = credential ? {
       ...credentials,
       read: async (id) => id === "cursor" ? state.credential : undefined,
@@ -57,6 +57,12 @@ async function fixture(
           state.writes++
         }
         return state.credential
+      },
+      // A logout must leave a mark, or a failed renewal that cleared the credential would pass unseen.
+      delete: async (id) => {
+        assert.equal(id, "cursor")
+        state.deletes++
+        state.credential = undefined
       },
     } : credentials
     const runtime = await ModelRuntime.create({ credentials: store, modelsPath, refreshOnCreate: false })
@@ -183,11 +189,11 @@ test("native OAuth credentials remain usable and subscription-backed", async () 
 
 test("expired native OAuth credentials are refreshed and saved once", async () => {
   await fixture(async (runtime, _dir, calls, state) => {
-    const before = calls.filter((url) => url.endsWith("exchange_user_api_key")).length
+    const before = calls.filter((url) => url.endsWith("/oauth/token")).length
     assert.equal(before, 1)
     assert.equal((await runtime.getAuth("cursor"))?.auth.apiKey, "refreshed-oauth-access-xxxxxxxxxxxxxxxxxxxx")
     assert.equal((await runtime.getAuth("cursor"))?.auth.apiKey, "refreshed-oauth-access-xxxxxxxxxxxxxxxxxxxx")
-    assert.equal(calls.filter((url) => url.endsWith("exchange_user_api_key")).length, before)
+    assert.equal(calls.filter((url) => url.endsWith("/oauth/token")).length, before)
     assert.ok(state.credential?.type === "oauth")
     assert.equal(state.credential.refresh, "refreshed-token")
     assert.ok(state.credential.expires > Date.now())
@@ -195,4 +201,23 @@ test("expired native OAuth credentials are refreshed and saved once", async () =
   }, undefined, {
     type: "oauth", access: "expired-oauth-access-xxxxxxxxxxxxxxxxxxxx", refresh: "expired-refresh", expires: Date.now() - 1000,
   })
+})
+
+test("a failed renewal keeps the stored credential", async () => {
+  for (const status of [400, 401, 429, 500]) {
+    await fixture(async (runtime, _dir, _calls, state) => {
+      // Expire the credential after the fixture's own refresh, so this read is the one that renews.
+      assert.ok(state.credential?.type === "oauth")
+      state.credential.expires = Date.now() - 1000
+      globalThis.fetch = (async () => new Response("invalid_grant", { status })) as typeof fetch
+      await assert.rejects(runtime.getAuth("cursor"), /OAuth refresh failed/)
+      assert.equal(state.writes, 0)
+      assert.equal(state.deletes, 0)
+      assert.ok(state.credential?.type === "oauth")
+      assert.equal(state.credential.access, "oauth-test-access-xxxxxxxxxxxxxxxxxxxx")
+      assert.equal(state.credential.refresh, "refresh-test")
+    }, undefined, {
+      type: "oauth", access: "oauth-test-access-xxxxxxxxxxxxxxxxxxxx", refresh: "refresh-test", expires: Date.now() + 3_600_000,
+    })
+  }
 })

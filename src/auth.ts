@@ -5,6 +5,8 @@
  * https://github.com/Rahularya01/pi-cursor
  * cursor-agent's auth.json is read the way magpie reads it, and never written.
  * Browser sign-in is the deep-control PKCE flow, polled at api2.cursor.sh.
+ * A stored login is renewed the way Cursor's IDE renews it, as oh-my-pi (MIT)
+ * documents: a refresh_token grant at api2.cursor.sh/oauth/token.
  * Tokens are never written to logs.
  */
 import { execFile, spawn } from "node:child_process"
@@ -21,7 +23,9 @@ export { sleep }
 
 const LOGIN_URL = "https://cursor.com/loginDeepControl"
 const POLL_URL = `${API}/auth/poll`
-const EXCHANGE_URL = `${API}/auth/exchange_user_api_key`
+const REFRESH_URL = `${API}/oauth/token`
+/** The OAuth client Cursor's IDE renews its login session with. */
+const CLIENT_ID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
 
 export type AuthSource = "environment" | "pi-oauth" | "cursor-agent" | "keychain" | "ide-state"
 
@@ -236,22 +240,30 @@ export async function login(callbacks: OAuthLoginCallbacks): Promise<OAuthCreden
   throw new Error("Cursor sign-in timed out")
 }
 
+/**
+ * Renew a stored login with the grant Cursor's IDE uses.
+ *
+ * The refresh token is the session credential, so renewal works even after the
+ * access token expired. The host passes its own timeout signal; a rotated
+ * refresh token is returned so the host can persist it.
+ */
 export async function refresh(credentials: OAuthCredentials, signal?: AbortSignal): Promise<OAuthCredentials> {
-  const res = await fetch(EXCHANGE_URL, {
+  const refreshToken = trimmed(credentials.refresh)
+  if (!refreshToken) throw new Error("Cursor has no refresh token. Run /login cursor again.")
+  const res = await fetch(REFRESH_URL, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${credentials.access}`,
-      "Content-Type": "application/json",
-      "connect-protocol-version": "1",
-      "x-cursor-client-type": "cli",
-      "x-cursor-client-version": await clientVersion(),
-    },
-    body: "{}",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ grant_type: "refresh_token", client_id: CLIENT_ID, refresh_token: refreshToken }),
     signal,
   })
+  // Never echo the body: it can quote the credential back.
   if (!res.ok) throw new Error(`Cursor sign-in could not be refreshed (HTTP ${res.status})`)
-  const body = (await res.json().catch(() => null)) as { accessToken?: unknown; refreshToken?: unknown; access?: unknown; refresh?: unknown } | null
-  const access = trimmed(body?.accessToken) || trimmed(body?.access) || credentials.access
-  const nextRefresh = trimmed(body?.refreshToken) || trimmed(body?.refresh) || credentials.refresh
-  return { access, refresh: nextRefresh, expires: expiresAt(access) }
+  const body = (await res.json().catch(() => null)) as
+    | { access_token?: unknown; refresh_token?: unknown; shouldLogout?: unknown }
+    | null
+  // Cursor answers a session it will not renew with 200, no token, and shouldLogout.
+  if (body?.shouldLogout === true) throw new Error("Cursor ended this sign-in. Run /login cursor again.")
+  const access = trimmed(body?.access_token)
+  if (!access) throw new Error("Cursor sent back no access token while refreshing the sign-in")
+  return { access, refresh: trimmed(body?.refresh_token) || refreshToken, expires: expiresAt(access) }
 }
