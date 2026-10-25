@@ -31,11 +31,12 @@ export function registerCursorFast(pi: ExtensionAPI) {
   }
 
   function display(ctx: ExtensionContext, text: string | undefined) {
-    if (ctx.mode !== "tui" || !supportsInlineFastFooter) {
-      ctx.ui.setStatus(STATUS, text)
-      return
-    }
-    ctx.ui.setStatus(STATUS, undefined)
+    // Publish the status unconditionally: footers that render extension statuses
+    // (pi-ccline, or Pi's own footer before 1.4) show it even when another
+    // extension owns the footer slot. Our own footer filters this key out
+    // (fast-footer.ts), so the inline badge is never duplicated.
+    ctx.ui.setStatus(STATUS, text)
+    if (ctx.mode !== "tui" || !supportsInlineFastFooter) return
     if (!text) { clearFooter(); return }
     badge = text
     if (!footerInstalled && !footerYielded) {

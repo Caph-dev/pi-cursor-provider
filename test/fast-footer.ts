@@ -90,7 +90,7 @@ test("TUI fast is on row two alongside unchanged usage/model; other statuses sta
   }
   assert.ok(!lines[1].includes("(auto)"))
   assert.equal(lines[2], "Other status")
-  assert.equal(h.statuses.has("cursor-fast"), false)
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: off", "the status row stays published for footers that render statuses")
   const id = h.ctx.model.id
   await h.command("on")
   assert.ok(h.lines()[1].includes("fast: on"))
@@ -104,6 +104,7 @@ test("TUI fast is on row two alongside unchanged usage/model; other statuses sta
   assert.ok(h.lines()[1].includes("(auto)"))
   assert.ok(!h.lines()[1].includes("(sub)"))
   await h.emit("session_shutdown")
+  assert.equal(h.statuses.get("cursor-fast"), undefined, "shutdown clears the status even while Cursor stays selected")
 })
 
 test("second-row usage refreshes when the session appends a new entry", async () => {
@@ -150,8 +151,10 @@ test("a later footer extension keeps ownership when Cursor is deselected or shut
   h.replaceFooter()
   await h.emit("before_agent_start")
   assert.deepEqual(h.lines(), ["Another footer"])
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: off", "a foreign footer still gets the status")
   h.setProvider("other")
   await h.emit("model_select")
+  assert.equal(h.statuses.get("cursor-fast"), undefined, "a non-Cursor model clears it")
   await h.emit("session_shutdown")
   assert.equal(h.resetCount(), 0)
   assert.deepEqual(h.lines(), ["Another footer"])

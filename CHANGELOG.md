@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+
+- The `cursor-fast` status is always published with `ctx.ui.setStatus`, not only when Pi's own footer is in use. A footer that renders extension statuses — including pi-ccline, which takes the only custom-footer slot on Pi 1.4 — now shows `fast: on/off/unavailable` instead of losing it. Cursor's own footer still filters that key out, so the inline badge never appears twice.
+
 ## 0.5.1
 
 - A stored login renews the way the Cursor IDE does: a `refresh_token` grant at `api2.cursor.sh/oauth/token`, using the stored refresh token rather than the access token. A session Cursor ends asks for `/login cursor` instead of reporting a bare HTTP status. Checked against the real service: the grant minted a new access token, and that token opened a Run, listed models, and read usage. Offline tests cover the grant, rotation, and the failures.
