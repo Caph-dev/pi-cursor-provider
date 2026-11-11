@@ -11,17 +11,19 @@ import type { Model, Provider } from "@earendil-works/pi-ai"
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent"
 import { login, refresh, resolveAccessToken } from "./auth.ts"
 import { AGENT, clientVersion } from "./client.ts"
-import { hiddenPatterns, visible } from "./config.ts"
+import { hiddenPatterns, showAllModels, visible } from "./config.ts"
 import { registerCursorDoctor } from "./doctor.ts"
-import { piModelConfigs, usable } from "./models.ts"
+import { limitsForCatalogue, refreshLimits } from "./limits.ts"
+import { piModelConfigs, planCovered, usable } from "./models.ts"
 import { registerCursorFast } from "./fast.ts"
-import { fetchUsage, formatUsage } from "./usage.ts"
+import { fetchUsage, formatUsage, planCoverage } from "./usage.ts"
 
 export { fetchUsage, formatUsage, onDemandOf } from "./usage.ts"
 
 // One catalogue per credential: a refresh for one account must never serve
-// its models to another.
-const catalogs = new Map<string, Model<"cursor-run">[]>()
+// its models to another. The catalogue stays complete; `paid` is the subset a
+// merged (unified) plan's included allowance covers, applied when reading.
+const catalogs = new Map<string, { models: Model<"cursor-run">[]; paid?: Set<string> }>()
 
 function credentialKey(token: string): string {
   return createHash("sha256").update(token).digest("hex")
@@ -35,14 +37,24 @@ export default function (pi: ExtensionAPI) {
   // Which credential produced `offered`; undefined when it came from Pi's cache
   // alone, whose provenance this provider cannot see.
   let offeredKey: string | undefined
+  // The ids the current catalogue may offer on a merged plan; undefined when the
+  // account is on Cursor's own plans, nothing is known, or `showAllModels` is
+  // set. Applied on every read, so the setting takes effect without a refresh.
+  let offeredPaid: Set<string> | undefined
+  const planFilter = (models: readonly Model<"cursor-run">[]): Model<"cursor-run">[] => {
+    const paid = offeredPaid
+    if (!paid || showAllModels()) return [...models]
+    const kept = models.filter((model) => paid.has(model.id))
+    return kept.length ? [...kept] : [...models]
+  }
   const fast = registerCursorFast(pi)
   const provider: Provider<"cursor-run"> = {
     id: "cursor",
     name: "Cursor",
     baseUrl: AGENT,
-    getModels: () => visible(offered, hiddenPatterns()),
+    getModels: () => visible(planFilter(offered), hiddenPatterns()),
     // Pi applies this after models.json overlays, including user-added models.
-    filterModels: (models) => visible(models, hiddenPatterns()),
+    filterModels: (models) => visible(planFilter(models), hiddenPatterns()),
     auth: {
       apiKey: {
         name: "Cursor access token",
@@ -91,33 +103,67 @@ export default function (pi: ExtensionAPI) {
       // network, so an offline reload does not look like a signed-out account.
       const kept = token ? catalogs.get(credentialKey(token)) : undefined
       if (!ctx.allowNetwork || !auth) {
-        if (kept?.length) {
-          await ctx.publish({ update: () => { offered = kept; offeredKey = token ? credentialKey(token) : undefined; fast.catalogueChanged() } })
+        if (kept?.models.length) {
+          await ctx.publish({
+            update: () => {
+              offered = kept.models
+              offeredPaid = kept.paid
+              offeredKey = token ? credentialKey(token) : undefined
+              fast.catalogueChanged()
+            },
+          })
         }
         return
       }
       const key = credentialKey(auth.token)
       try {
-        const next = piModelConfigs(await usable(auth.token, ctx.force === true, ctx.signal)).map((model: Model<"cursor-run">) => ({
+        // A merged (unified) subscription covers only part of what Cursor lists:
+        // ids outside the reported included allowance are not offered, since
+        // sampled Runs on them were refused. `showAllModels` skips the lookups
+        // entirely, and an account on Cursor's own plans has nothing to look up.
+        const override = showAllModels()
+        const [raw, coverage, limits] = await Promise.all([
+          usable(auth.token, ctx.force === true, ctx.signal),
+          override ? Promise.resolve(undefined) : planCoverage(auth.token, ctx.signal),
+          // model metadata, never a reason to fail the catalogue
+          limitsForCatalogue(ctx.signal),
+        ])
+        // A merged plan keeps its coverage when a period report goes unread, so
+        // the picker does not reopen with models the plan does not pay for.
+        const known = catalogs.get(key)?.paid
+        const covered = coverage?.merged && coverage.ids ? planCovered(raw, coverage.ids) : []
+        const paid: Set<string> | undefined = covered.length
+          ? new Set(covered.map((entry: { id: string }) => entry.id))
+          : coverage?.merged
+            ? known
+            : undefined
+        const next = piModelConfigs(raw, limits).map((model: Model<"cursor-run">) => ({
           ...model,
           provider: "cursor",
           baseUrl: AGENT,
         })) as Model<"cursor-run">[]
         if (ctx.signal.aborted) return
-        catalogs.set(key, next)
+        catalogs.set(key, { models: next, paid })
         await ctx.publish({
           persist: { models: next, checkedAt: Date.now() },
-          update: () => { offered = next; offeredKey = key; fast.catalogueChanged() },
+          update: () => { offered = next; offeredPaid = paid; offeredKey = key; fast.catalogueChanged() },
         })
       } catch (error) {
         // Never keep another credential's catalogue after a failed refresh: fall
         // back to what this one discovered, even if that is nothing.
         const unknownSource = offeredKey === undefined
-        const previous = catalogs.get(key) ?? []
-        await ctx.publish({ update: () => { offered = previous; offeredKey = key; fast.catalogueChanged() } })
+        const previous = catalogs.get(key)
+        await ctx.publish({
+          update: () => {
+            offered = previous?.models ?? []
+            offeredPaid = previous?.paid
+            offeredKey = key
+            fast.catalogueChanged()
+          },
+        })
         // Surface a first-load failure instead of reporting an empty provider as
         // a successful refresh.
-        if (!previous.length && unknownSource) throw error
+        if (!(previous?.models.length ?? 0) && unknownSource) throw error
       }
     },
     stream: fast.stream,
@@ -194,6 +240,22 @@ export default function (pi: ExtensionAPI) {
 
   registerCursorDoctor(pi)
 
+  pi.registerCommand("cursor-provider-update", {
+    description: "Refetch the models.dev output limits and the Cursor model catalogue",
+    handler: async (args, ctx) => {
+      const extra = args.trim() ? " This command does not take arguments." : ""
+      const signal = ctx.signal ?? new AbortController().signal
+      const limits = await refreshLimits(signal, { force: true })
+      const kept = limits ? `${limits.size} model limits` : "no model limits (models.dev could not be read)"
+      try {
+        await refreshCatalogue(ctx, signal)
+        ctx.ui.notify(`Cursor model catalogue: ${offered.length} models, ${kept}.${extra}`, limits ? "info" : "warning")
+      } catch (error) {
+        ctx.ui.notify(`Cursor model catalogue: ${error instanceof Error ? error.message : String(error)} (${kept}).${extra}`, "warning")
+      }
+    },
+  })
+
   pi.registerCommand("cursor.usage", {
     description: "Show Cursor plan usage for this billing period",
     handler: async (args, ctx) => {
@@ -204,7 +266,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.notify(`Cursor is not signed in (${version}). Run /login cursor or set CURSOR_ACCESS_TOKEN.${extra}`, "warning")
         return
       }
-      let ids = (catalogs.get(credentialKey(auth.token)) ?? offered).map((m) => m.id)
+      let ids = (catalogs.get(credentialKey(auth.token))?.models ?? offered).map((m) => m.id)
       if (!ids.length) {
         try {
           ids = (await usable(auth.token, false, ctx.signal)).map((m: { id: string }) => m.id)

@@ -63,6 +63,39 @@ Pi keeps a separate scoped model list (`/scoped-models`, `enabledModels`, or `--
 
 If resume must keep working for the scoped-away models, Pi's own `enabledModels` setting scopes `/model` without removing anything from the registry: `{ "enabledModels": ["cursor/*sonnet*"] }` opens the picker on that scope, and Tab still reaches the rest.
 
+## Unified subscription
+
+An account on Cursor's merged (unified) subscription — one weekly allowance billed through xAI's own commerce — is still served the whole picker, but the plan's included usage covers only part of it. This package offers the ids that allowance reports as covered and leaves the rest out of `/model`. Sampled against a live X unified account: a Run on two of the excluded models was refused with `429 … is not included in your weekly usage: Buy credits or switch to a Grok model`; the other excluded ones were not each exercised.
+
+`GetPlanInfo`'s `isMerged` decides whether the filter runs at all; the current period's `autoBucketModels` names the ids the included usage pays for. An entry is offered when the id a Run at its default parameters resolves to is one of them, which is why an included effort can carry its family and an excluded default does not. Cursor's own plans filter nothing, and neither does a plan or period report that cannot be read.
+
+Measured on that account: 6 of 65 entries stayed (auto, Grok 4.7 at two context sizes, Grok 4.6, Grok 4.5, Composer 2.5). Whether buying credits makes an excluded model run is not established here — the reports above name covered ids only, so this package cannot tell an account's credits apart from its plan, and does not try.
+
+To offer every model Cursor lists, write `{ "showAllModels": true }` to `cursor.json` (see [Hide models](#hide-models)). The setting is applied when the catalogue is read, so it needs no refresh, and it skips the plan lookups altogether. The stored catalogue always stays complete: only what this provider offers is narrowed.
+
+Plan facts are cached for an hour per credential. The catalogue keeps the covered ids with it, so a plan change reaches `/model` on the next refresh or `/reload`.
+
+## Model metadata
+
+Each model entry carries what Pi needs to route a turn correctly:
+
+- `contextWindow` comes from Cursor's own picker: one entry per context size a model offers (`@256k`, `@500k`), else the model's token limit. Models the picker gives no size for fall back to 200k.
+- Thinking levels come from the model's `effort` parameter, mapped onto Pi's `off`…`max` levels; a model with only a `thinking` switch becomes `off`/`high`.
+- `maxTokens` comes from [models.dev](https://models.dev/api.json), matched by model id and taken as the limit most providers report, one vote per provider. It is never larger than the entry's context window, so a small-context entry also gets a small answer budget; a model models.dev does not list, such as Cursor's own Composer, keeps a 32k fallback. Pi clamps the value to the room left in the context before a request, so a generous limit only costs accuracy when it is too small.
+- `input` is `text` and `image` for every model. Cursor's `supportsImages` flag under-reports image support for the models sampled: it says `false` for Grok 4.7 and Composer 2.5, yet both described a real 512×396 photograph in detail (a black-and-white panda meme with a photoshopped human face), as did Grok 4.6 and Grok 4.5. The samples cover those entries, not the whole catalogue, and declaring `image` also stops Pi from replacing images with a placeholder before they reach Cursor.
+
+### The models.dev index
+
+The document is 5.5 MB of JSON, about 600 KB gzipped, so a session does not read it. `/cursor-provider-update` and the first catalogue refresh after an install or update write `cursor-limits.json` beside `cursor.json` (`$PI_CODING_AGENT_DIR`, else `~/.pi/agent`); every other refresh reads that file only. The file records the package version that wrote it, so updating this package refreshes the index once and leaves it alone afterwards, and concurrent refreshes share one download. A failed read is retried no sooner than ten minutes later and leaves the stored index in use; if the file cannot be written, the index still serves this session and the next one reads again.
+
+```text
+/cursor-provider-update
+```
+
+The command refetches the index and then the Cursor catalogue, and reports how many models and limits it ended up with. It takes no arguments.
+
+Cost stays zero for every model: a subscription bill is not a token price.
+
 ## Fast mode
 
 Select a Cursor model, then use:
@@ -108,10 +141,9 @@ Windows follow magpie, in this order.
 - Cursor Models
 - Other Models
 - On-demand, when the account has a dollar limit or an open on-demand spend
-- Grok Bot, or Grok Bot (trial), when the dashboard reports that allowance
 - Total
 
-Grok Bot is placed before an On-demand window that has no limit, and after one that has a limit. Total stays last.
+Total stays last. Only what a Pi turn can spend is reported: a plan's allowance for another product, such as Cursor's Grok bot, is left out even when the dashboard reports it.
 
 ```text
 Plan: Pro

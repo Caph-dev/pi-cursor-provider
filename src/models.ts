@@ -8,6 +8,7 @@
 // @ts-nocheck
 import { API, DEFAULT_CONTEXT, MODELS_KEEP, unary } from "./client.ts"
 import { recall, store, tokenKey } from "./cache.ts"
+import { ALIAS_IDS, limitKey } from "./limits.ts"
 
 const LEVEL_RANK = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 const EFFORT_PARAMS = ["effort", "reasoning_effort", "reasoning"]
@@ -244,6 +245,18 @@ const lists = new Map()
 export function modelCacheKeys() {
   return [...lists.keys()]
 }
+
+// planCovered is the entries a merged (unified) plan's included allowance pays
+// for: the id a Run at the entry's default parameters resolves to (the default
+// effort, fast off) is one the period report counts. The report says nothing
+// about what an id outside it would cost; sampled Runs on such ids were refused
+// with 429 "not included in your weekly usage". Entries left out stay in
+// usable(), so an id passed explicitly still resolves to its variants; only
+// what the picker offers is narrowed.
+export function planCovered(raw, ids) {
+  return raw.filter((entry) => ids.has(pick(entry, "off", false).id))
+}
+
 export async function usable(tok, force = false, signal?: AbortSignal) {
   const h = tokenKey(tok)
   const had = recall(lists, h)
@@ -342,8 +355,28 @@ export function supportsFast(raw, id, effort = "off") {
   })
 }
 
-/** Pi chat-model configs. Cost stays zero: a subscription bill is not a token price. */
-export function piModelConfigs(raw) {
+// outputOf is how many tokens a model may answer with, as models.dev reports it
+// for the picker's name or the model's server name, never more than the context
+// window the catalogue has for the entry.
+const OUTPUT_FALLBACK = 32_000
+function outputOf(m, limits) {
+  // Never more than the entry can take in: a small context makes a small answer
+  // budget, whether the limit is reported or guessed.
+  const room = m.context || DEFAULT_CONTEXT
+  if (!limits) return Math.min(OUTPUT_FALLBACK, room)
+  // `default` (Cursor's auto) and `auto` name the router, not a model, and would
+  // match an unrelated models.dev id.
+  const keys = [m.run, m.model?.serverModelName, m.id].map(limitKey).filter((key) => key && !ALIAS_IDS.has(key))
+  const reported = keys.map((key) => limits.get(key)).find((value) => value !== undefined)
+  return Math.min(reported ?? OUTPUT_FALLBACK, room)
+}
+
+/**
+ * Pi chat-model configs. Cost stays zero: a subscription bill is not a token
+ * price. `limits` is models.dev's output limits (see limits.ts); without it the
+ * catalogue falls back to 32k.
+ */
+export function piModelConfigs(raw: any, limits?: Map<string, number>) {
   return raw.map((m) => {
     const thinking = thinkingLevelMap(m.levels)
     return {
@@ -355,7 +388,7 @@ export function piModelConfigs(raw) {
       input: ["text", "image"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: m.context || DEFAULT_CONTEXT,
-      maxTokens: 32_000,
+      maxTokens: outputOf(m, limits),
       cursorFastLevels: PI_LEVELS.filter(([level]) => supportsFast(raw, m.id, level)).map(([level]) => level),
     }
   })

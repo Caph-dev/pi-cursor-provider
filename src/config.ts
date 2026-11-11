@@ -13,6 +13,11 @@
  * Hiding removes models from the live directory too: sessions already using a
  * hidden model keep it, but resuming one may require selecting another model.
  * A missing, unreadable or malformed file hides nothing.
+ *
+ * `showAllModels` switches off the plan filter that a merged (unified)
+ * subscription applies to the catalogue:
+ *
+ *   { "showAllModels": true }
  */
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
@@ -32,20 +37,29 @@ function patternsOf(value: unknown): string[] {
   return value.flatMap((v) => (typeof v === "string" && v.trim() ? [v.trim()] : []))
 }
 
-/** The patterns in `cursor.json`. A file that is absent or not JSON hides nothing. */
-export function hiddenPatterns(path: string = configPath()): string[] {
+/** `cursor.json` as parsed JSON, or undefined when it is absent or not JSON. */
+function jsonAt(path: string): unknown {
   let text: string
   try {
     text = readFileSync(path, "utf8")
   } catch {
-    return []
+    return undefined
   }
   try {
-    const json: unknown = JSON.parse(text)
-    return patternsOf((json as { hiddenModels?: unknown } | null)?.hiddenModels)
+    return JSON.parse(text)
   } catch {
-    return []
+    return undefined
   }
+}
+
+/** The patterns in `cursor.json`. A file that is absent or not JSON hides nothing. */
+export function hiddenPatterns(path: string = configPath()): string[] {
+  return patternsOf((jsonAt(path) as { hiddenModels?: unknown } | null)?.hiddenModels)
+}
+
+/** Whether `cursor.json` asks for every model Cursor lists, plan filter aside. */
+export function showAllModels(path: string = configPath()): boolean {
+  return (jsonAt(path) as { showAllModels?: unknown } | null)?.showAllModels === true
 }
 
 /** A pattern as a regex: `*` any run, the rest literal (a `?` is a question mark, not a wildcard),

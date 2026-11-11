@@ -3,18 +3,18 @@
  *
  * Ported from magpie's Cursor provider (MIT):
  * https://github.com/magpie-community/plugins/tree/main/packages/cursor
- * Plan lookup uses the shared Connect client. Period, hard limit, and Grok
- * Bot stay on their own fetches so a refused dashboard call is a report,
- * not a thrown request.
+ * Plan lookup uses the shared Connect client. The period and the hard limit
+ * stay on their own fetches so a refused dashboard call is a report, not a
+ * thrown request. Only the subscription this package spends is reported:
+ * a plan's allowance for another product (Cursor's Grok bot) is not usage a
+ * Pi turn can draw on, so it is left out.
  */
 import { STATUS_CODES } from "node:http"
 import { API, unary } from "./client.ts"
 import { tokenKey, recall, store } from "./cache.ts"
 
-export const WEBSITE = "https://cursor.com"
-
 const PLAN_TTL = 3600_000
-const plans = new Map<string, { plan: string; expires: number }>()
+const plans = new Map<string, { plan: string; merged: boolean; expires: number }>()
 
 function until(ms: number, signal?: AbortSignal): AbortSignal {
   const deadline = AbortSignal.timeout(ms)
@@ -179,19 +179,54 @@ async function periodUsage(tok: string, ids: string[], signal?: AbortSignal): Pr
   }
 }
 
-async function planOf(tok: string, signal?: AbortSignal): Promise<string> {
+async function planFacts(tok: string, signal?: AbortSignal): Promise<{ plan: string; merged: boolean }> {
   const key = tokenKey(tok)
   const had = recall(plans, key)
-  if (had) return had.plan
+  if (had) return { plan: had.plan, merged: had.merged }
   try {
     const body = await unary(API, "aiserver.v1.DashboardService/GetPlanInfo", tok, {}, 15_000, signal)
     if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
     const plan = String(body?.planInfo?.planName ?? "").trim()
-    if (plan) store(plans, key, { plan, expires: 0 }, PLAN_TTL)
-    return plan
+    // A merged account bills through Cursor's unified subscription: one weekly
+    // allowance, whose report names the models it covers. `nextUpgrade` names a
+    // plan the account could move to, not the one it has, so it is not a signal.
+    const merged = body?.isMerged === true
+    if (plan) store(plans, key, { plan, merged, expires: 0 }, PLAN_TTL)
+    return { plan, merged }
   } catch (err) {
     if (cancelled(signal, err)) throw err
-    return ""
+    return { plan: "", merged: false }
+  }
+}
+
+/**
+ * What a plan's included allowance covers. `merged: false` is a Cursor plan and
+ * nothing to filter. `merged: true` with `ids` is the merged (unified) billing
+ * whose period report names the models its included usage pays for; merged with
+ * no `ids` is that plan with a report that could not be read. The period report
+ * says nothing about the rest of the picker; sampled Runs on ids outside it were
+ * refused with 429 "not included in your weekly usage".
+ */
+export type PlanCoverage = { merged: boolean; ids?: Set<string> }
+
+export async function planCoverage(tok: string, signal?: AbortSignal): Promise<PlanCoverage> {
+  const { merged } = await planFacts(tok, signal)
+  if (!merged) return { merged: false }
+  try {
+    const res = await fetch(API + "/aiserver.v1.DashboardService/GetCurrentPeriodUsage", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${tok}`, "Content-Type": "application/json", "Connect-Protocol-Version": "1" },
+      body: "{}",
+      signal: until(15_000, signal),
+    })
+    if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
+    if (!res.ok) return { merged: true }
+    const data = (await res.json()) as { autoBucketModels?: unknown }
+    const ids = Array.isArray(data?.autoBucketModels) ? data.autoBucketModels.filter((id): id is string => typeof id === "string" && id !== "") : []
+    return ids.length ? { merged: true, ids: new Set(ids) } : { merged: true }
+  } catch (err) {
+    if (cancelled(signal, err)) throw err
+    return { merged: true }
   }
 }
 
@@ -199,61 +234,12 @@ export function planCacheKeys(): string[] {
   return [...plans.keys()]
 }
 
-async function botUsage(tok: string, signal?: AbortSignal): Promise<UsageWindow[]> {
-  try {
-    const subject = JSON.parse(Buffer.from(tok.split(".")[1] ?? "", "base64url").toString()).sub
-    if (typeof subject !== "string") return []
-    const user = subject.split("|").filter(Boolean).at(-1)
-    if (!user || !/^[a-zA-Z0-9._-]+$/.test(user)) return []
-    const res = await fetch(WEBSITE + "/api/dashboard/get-sand-usage-status", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        Origin: WEBSITE,
-        Cookie: "WorkosCursorSessionToken=" + encodeURIComponent(user + "::" + tok),
-      },
-      body: "{}",
-      redirect: "error",
-      signal: until(5_000, signal),
-    })
-    if (signal?.aborted) throw Object.assign(new Error("The operation was aborted"), { name: "AbortError" })
-    if (!res.ok) return []
-    const data = (await res.json()) as {
-      includedLimitZero?: boolean
-      hasNonZeroIncludedLimit?: boolean
-      sandTrialExpiresAt?: string
-      usagePercent?: number
-      nextResetTimestampUtc?: string
-    }
-    const paid = typeof data?.includedLimitZero === "boolean" ? !data.includedLimitZero : data?.hasNonZeroIncludedLimit === true
-    const trial = !paid && typeof data?.sandTrialExpiresAt === "string" && Date.parse(data.sandTrialExpiresAt) > Date.now()
-    if ((!paid && !trial) || typeof data?.usagePercent !== "number" || !Number.isFinite(data.usagePercent)) return []
-    const reset = paid && typeof data.nextResetTimestampUtc === "string" ? Date.parse(data.nextResetTimestampUtc) : NaN
-    return [
-      {
-        name: trial ? "Grok Bot (trial)" : "Grok Bot",
-        used: Math.max(0, Math.min(100, data.usagePercent)),
-        aside: true,
-        ...(Number.isFinite(reset) ? { resetsAt: new Date(reset).toISOString(), span: 604800 } : {}),
-      },
-    ]
-  } catch (err) {
-    if (cancelled(signal, err)) throw err
-    return []
-  }
-}
-
 /** Plan name plus the billing-period windows. GetPlanInfo is cached for about an hour per token. */
 export async function fetchUsage(tok: string, modelIds: string[], signal?: AbortSignal): Promise<UsageReport> {
-  const [u, plan, bot] = await Promise.all([
-    periodUsage(tok, modelIds, signal),
-    planOf(tok, signal),
-    botUsage(tok, signal),
-  ])
+  const [u, facts] = await Promise.all([periodUsage(tok, modelIds, signal), planFacts(tok, signal)])
   const last = (w: UsageWindow) => w.name === "Total" || (w.name === "On-demand" && w.aside)
-  const windows = [...u.windows.filter((w) => !last(w)), ...bot, ...u.windows.filter(last)]
-  return { ...u, windows, ...(plan ? { plan } : {}) }
+  const windows = [...u.windows.filter((w) => !last(w)), ...u.windows.filter(last)]
+  return { ...u, windows, ...(facts.plan ? { plan: facts.plan } : {}) }
 }
 
 function percent(n: number) {

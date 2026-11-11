@@ -7,6 +7,7 @@ import { join } from "node:path"
 import { afterEach, test } from "node:test"
 import type { Provider, RefreshModelsContext } from "@earendil-works/pi-ai"
 import register from "../src/index.ts"
+import { clearLimitsRetry } from "../src/limits.ts"
 
 const realFetch = globalThis.fetch
 const dirs: string[] = []
@@ -14,6 +15,7 @@ let tokens = 0
 
 afterEach(() => {
   globalThis.fetch = realFetch
+  clearLimitsRetry()
   for (const dir of dirs.splice(0)) rmSync(dir, { force: true, recursive: true })
 })
 
@@ -148,5 +150,211 @@ test("a refresh without the network re-reads cursor.json, hides and restores mod
     writeFileSync(join(dir, "cursor.json"), JSON.stringify({ hiddenModels: [] }))
     assert.deepEqual(await listed(refreshModels, false), ["gpt-5@300k"])
     assert.equal(calls.length, before, "a refresh without the network makes no request")
+  })
+})
+
+// A merged (unified) account is served the picker's models but only a few are
+// inside the included allowance: a Run for any other one is refused with 429.
+const twoModels = {
+  models: [
+    {
+      name: "gpt-5",
+      clientDisplayName: "GPT-5",
+      supportsAgent: true,
+      contextTokenLimit: 300_000,
+      variants: [{ legacySlug: "gpt-5", isDefaultNonMaxConfig: true, parameterValues: [{ id: "context", value: "300k" }] }],
+      parameterDefinitions: [{ id: "context", parameterType: { enumParameter: { values: [{ value: "300k" }] } } }],
+    },
+    { name: "claude-test", clientDisplayName: "Claude Test", supportsAgent: true, contextTokenLimit: 200_000 },
+  ],
+}
+
+function stubPlan(calls: string[], plan: unknown, period: () => Response): void {
+  globalThis.fetch = (async (url: string) => {
+    calls.push(String(url))
+    if (String(url).endsWith("GetPlanInfo")) return new Response(JSON.stringify(plan), { status: 200 })
+    if (String(url).includes("GetCurrentPeriodUsage")) return period()
+    const body = String(url).endsWith("GetUsableModels")
+      ? { models: [{ modelId: "gpt-5" }, { modelId: "claude-test" }] }
+      : twoModels
+    return new Response(JSON.stringify(body), { status: 200 })
+  }) as typeof fetch
+}
+
+test("a merged plan publishes only the models its included allowance covers", async () => {
+  await withEnv(withConfig([]), async () => {
+    const calls: string[] = []
+    stubPlan(calls, { planInfo: { planName: "Super" }, isMerged: true }, () => Response.json({ autoBucketModels: ["gpt-5"] }))
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k"])
+    assert.equal(calls.some((u) => u.includes("GetCurrentPeriodUsage")), true)
+  })
+})
+
+test("a Cursor plan keeps every model and asks for no period report", async () => {
+  await withEnv(withConfig([]), async () => {
+    const calls: string[] = []
+    stubPlan(calls, { planInfo: { planName: "Pro" }, isMerged: false, nextUpgrade: { tier: "ultra" } }, () => Response.json({}))
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k", "claude-test"])
+    assert.equal(calls.some((u) => u.includes("GetCurrentPeriodUsage")), false)
+  })
+})
+
+test("a merged plan whose period report fails keeps every model", async () => {
+  await withEnv(withConfig([]), async () => {
+    const calls: string[] = []
+    stubPlan(calls, { planInfo: { planName: "Super" }, isMerged: true }, () => new Response("no", { status: 500 }))
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k", "claude-test"])
+  })
+})
+
+test("an upgrade offer alone does not make an account merged", async () => {
+  await withEnv(withConfig([]), async () => {
+    const calls: string[] = []
+    stubPlan(calls, { planInfo: { planName: "Pro" }, isMerged: false, nextUpgrade: { tier: "unified_ultra" } }, () =>
+      Response.json({ autoBucketModels: ["gpt-5"] }),
+    )
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k", "claude-test"])
+    assert.equal(calls.some((u) => u.includes("GetCurrentPeriodUsage")), false)
+  })
+})
+
+test("the plan filter follows the default variant, not any variant of the model", async () => {
+  await withEnv(withConfig([]), async () => {
+    const calls: string[] = []
+    const efforts = [{ value: "low" }, { value: "high" }]
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url))
+      if (String(url).endsWith("GetPlanInfo")) return Response.json({ planInfo: { planName: "Super" }, isMerged: true })
+      if (String(url).includes("GetCurrentPeriodUsage")) return Response.json({ autoBucketModels: ["a-high", "b-high"] })
+      if (String(url).endsWith("GetUsableModels")) return Response.json({ models: [{ modelId: "a-low" }, { modelId: "a-high" }, { modelId: "b-high" }] })
+      const model = (name: string, at: string, other: string) => ({
+        name,
+        clientDisplayName: name,
+        supportsAgent: true,
+        contextTokenLimit: 200_000,
+        parameterDefinitions: [{ id: "effort", parameterType: { enumParameter: { values: efforts } } }],
+        variants: [
+          { legacySlug: `${name}-${at}`, isDefaultNonMaxConfig: true, parameterValues: [{ id: "effort", value: at }] },
+          { legacySlug: `${name}-${other}`, parameterValues: [{ id: "effort", value: other }] },
+        ],
+      })
+      // `a` starts at the effort the allowance does not cover, `b` at the one it does
+      return Response.json({ models: [model("a", "low", "high"), model("b", "high", "low")] })
+    }) as typeof fetch
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["b"])
+    assert.ok(calls.some((u) => u.includes("GetCurrentPeriodUsage")))
+  })
+})
+
+test("showAllModels in cursor.json offers every model a merged plan lists", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cursor-wiring-"))
+  dirs.push(dir)
+  writeFileSync(join(dir, "cursor.json"), JSON.stringify({ showAllModels: true }))
+  await withEnv(dir, async () => {
+    const calls: string[] = []
+    stubPlan(calls, { planInfo: { planName: "Super" }, isMerged: true }, () => Response.json({ autoBucketModels: ["gpt-5"] }))
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k", "claude-test"])
+  })
+})
+
+test("showAllModels skips the plan lookups and restores the catalogue without the network", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cursor-wiring-"))
+  dirs.push(dir)
+  writeFileSync(join(dir, "cursor.json"), JSON.stringify({ showAllModels: true }))
+  await withEnv(dir, async () => {
+    const calls: string[] = []
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url))
+      if (String(url).includes("DashboardService")) throw new Error("the override asks for no plan")
+      const body = String(url).endsWith("GetUsableModels")
+        ? { models: [{ modelId: "gpt-5" }, { modelId: "claude-test" }] }
+        : twoModels
+      return new Response(JSON.stringify(body), { status: 200 })
+    }) as typeof fetch
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k", "claude-test"])
+    assert.equal(calls.some((u) => u.includes("DashboardService")), false)
+  })
+})
+
+test("turning the override on restores the excluded models without another request", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "cursor-wiring-"))
+  dirs.push(dir)
+  writeFileSync(join(dir, "cursor.json"), JSON.stringify({ hiddenModels: [] }))
+  await withEnv(dir, async () => {
+    const calls: string[] = []
+    stubPlan(calls, { planInfo: { planName: "Super" }, isMerged: true }, () => Response.json({ autoBucketModels: ["gpt-5"] }))
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k"])
+    const before = calls.length
+    writeFileSync(join(dir, "cursor.json"), JSON.stringify({ showAllModels: true }))
+    assert.deepEqual(await listed(refreshModels, false), ["gpt-5@300k", "claude-test"])
+    assert.equal(calls.length, before, "the restored catalogue needs no request")
+  })
+})
+
+test("an abort during the period report publishes no catalogue", async () => {
+  await withEnv(withConfig([]), async () => {
+    const original = globalThis.fetch
+    let periodStarted = false
+    globalThis.fetch = ((url: string, init?: RequestInit) => {
+      const href = String(url)
+      if (href.endsWith("GetPlanInfo")) return Promise.resolve(Response.json({ planInfo: { planName: "Super" }, isMerged: true }))
+      if (href.includes("GetCurrentPeriodUsage")) {
+        periodStarted = true
+        return new Promise((_resolve, reject) => {
+          const fail = () => reject(Object.assign(new Error("The operation was aborted"), { name: "AbortError" }))
+          if (init?.signal?.aborted) return fail()
+          init?.signal?.addEventListener("abort", fail, { once: true })
+        })
+      }
+      return Promise.resolve(Response.json(String(href).endsWith("GetUsableModels") ? { models: [] } : twoModels))
+    }) as typeof fetch
+    try {
+      const controller = new AbortController()
+      const { provider, refreshModels } = await registered()
+      const pending = refreshModels({
+        allowNetwork: true,
+        force: true,
+        signal: controller.signal,
+        credential: undefined,
+      })
+      const started = Date.now()
+      while (!periodStarted && Date.now() - started < 2_000) await new Promise((resolve) => setTimeout(resolve, 10))
+      assert.equal(periodStarted, true)
+      controller.abort()
+      await assert.rejects(pending, /aborted/)
+      assert.deepEqual(provider.getModels(), [])
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
+
+test("a period report that fails after a good one keeps the coverage it knew", async () => {
+  await withEnv(withConfig([]), async () => {
+    const calls: string[] = []
+    let periodOk = true
+    globalThis.fetch = (async (url: string) => {
+      calls.push(String(url))
+      if (String(url).endsWith("GetPlanInfo")) return Response.json({ planInfo: { planName: "Super" }, isMerged: true })
+      if (String(url).includes("GetCurrentPeriodUsage")) {
+        return periodOk ? Response.json({ autoBucketModels: ["gpt-5"] }) : new Response("no", { status: 500 })
+      }
+      const body = String(url).endsWith("GetUsableModels")
+        ? { models: [{ modelId: "gpt-5" }, { modelId: "claude-test" }] }
+        : twoModels
+      return Response.json(body)
+    }) as typeof fetch
+    const { refreshModels } = await registered()
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k"])
+    periodOk = false
+    assert.deepEqual(await listed(refreshModels, true), ["gpt-5@300k"], "the picker does not reopen")
   })
 })

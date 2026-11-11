@@ -38,6 +38,7 @@ globalThis.fetch = async (url) => {
     { name: "claude-test", supportsAgent: true, contextTokenLimit: 200000 }
   ] });
   if (name === "GetUsableModels") return Response.json({ models: [{ modelId: "gpt-5" }, { modelId: "gpt-5-fast" }, { modelId: "claude-test" }] });
+  if (name === "GetPlanInfo") return Response.json({});
   throw new Error("Unexpected network request in CLI regression test");
 };
 }

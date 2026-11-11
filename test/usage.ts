@@ -11,7 +11,6 @@ afterEach(() => {
 const PERIOD = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage"
 const PLAN = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetPlanInfo"
 const HARD = "https://api2.cursor.sh/aiserver.v1.DashboardService/GetHardLimit"
-const BOT = "https://cursor.com/api/dashboard/get-sand-usage-status"
 
 function jwt(payload: Record<string, unknown>): string {
   const header = Buffer.from(JSON.stringify({ alg: "none" })).toString("base64url")
@@ -130,19 +129,17 @@ test("a refused period is the HTTP status, with no windows", async () => {
   assert.equal(formatUsage(report), "Unauthorized")
 })
 
-test("Grok Bot is optional and sits ahead of Total", async () => {
+test("a period report adds no window for another product's allowance", async () => {
   const access = jwt({ sub: "auth0|user_test" })
-  install((url) => {
-    if (url === PLAN) return Response.json({ planInfo: { planName: "Pro" } })
-    if (url === BOT) return Response.json({ includedLimitZero: false, usagePercent: 42, nextResetTimestampUtc: "2030-01-08T00:00:00.000Z" })
+  const seen = install((url) => {
+    if (url === PLAN) return Response.json({ planInfo: { planName: "Super" } })
     if (url === PERIOD) return Response.json({ planUsage: { autoPercentUsed: 12, apiPercentUsed: 34, totalPercentUsed: 20 } })
-    return Response.json({})
+    return Response.json({ usagePercent: 42 })
   })
   const report = await fetchUsage(access, [])
   assert.deepEqual(
     report.windows.map((w) => w.name),
-    ["Cursor Models", "Other Models", "Grok Bot", "Total"],
+    ["Cursor Models", "Other Models", "Total"],
   )
-  assert.equal(report.windows[2]?.used, 42)
-  assert.equal(report.windows[2]?.aside, true)
+  assert.equal(seen.some((r) => r.url.startsWith("https://cursor.com/")), false)
 })
