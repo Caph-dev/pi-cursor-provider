@@ -101,12 +101,13 @@ Cost stays zero for every model: a subscription bill is not a token price.
 Select a Cursor model, then use:
 
 ```text
+/cursor.fast
 /cursor.fast on
-/cursor.fast status
 /cursor.fast off
+/cursor.fast status
 ```
 
-With no argument, `/cursor.fast` shows the current status. In the TUI, type `/cursor.fast ` and press Tab to choose `on` or `off`; a unique prefix such as `of` completes to `off` without executing the command. You can still type `/cursor.fast status` explicitly to query the status. In the TUI, `fast: on`, `fast: off`, or `fast: unavailable` appears on the second footer row beside the model/thinking information. Other extension statuses retain their own row. The same text is also published through `ctx.ui.setStatus`, so a footer that renders extension statuses — Pi's own footer, or pi-ccline's — still shows it when another extension owns the footer slot; Cursor's footer filters that key out, so it never appears twice. RPC clients continue receiving the `cursor-fast` status text. Enabling fast preserves the selected model ID, context size, and thinking level. It requires an account-available fast variant at the same context and effective thinking parameters; unsupported combinations are rejected.
+With no argument, `/cursor.fast` toggles the current model: off becomes on, and on becomes off. `/cursor.fast on` and `/cursor.fast off` set it explicitly. In the TUI, type `/cursor.fast ` and press Tab to choose `on` or `off`; a unique prefix such as `of` completes to `off` without executing the command. `/cursor.fast status` only reports the current state. In the TUI, `fast: on`, `fast: off`, or `fast: unavailable` appears on the second footer row beside the model/thinking information. Other extension statuses retain their own row. The same text is also published through `ctx.ui.setStatus`, so a footer that renders extension statuses — Pi's own footer, or pi-ccline's — still shows it when another extension owns the footer slot; Cursor's footer filters that key out, so it never appears twice. RPC clients continue receiving the `cursor-fast` status text. Enabling fast preserves the selected model ID, context size, and thinking level. It requires an account-available fast variant at the same context and effective thinking parameters; unsupported combinations are rejected.
 
 The setting defaults to off and belongs to the current model in the current session. Other models keep their own settings. Reloading or resuming that session restores the setting from its current branch; a new session starts with fast off. Changes apply to the next request and require the current response to finish first.
 

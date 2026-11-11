@@ -108,12 +108,12 @@ export function registerCursorFast(pi: ExtensionAPI) {
   pi.on("before_agent_start", (_event, ctx) => updateStatus(ctx))
 
   pi.registerCommand("cursor.fast", {
-    description: "Set Cursor fast mode for the current model: on, off, or status",
+    description: "Toggle Cursor fast for the current model, or set on, off, or status",
     getArgumentCompletions: (prefix) => ["on", "off"].filter((value) => value.startsWith(prefix.trimStart().toLowerCase())).map((value) => ({ value, label: value })),
     handler: async (args, ctx) => {
-      const action = args.trim().toLowerCase() || "status"
-      if (!["on", "off", "status"].includes(action)) {
-        ctx.ui.notify("Usage: /cursor.fast on|off|status", "warning")
+      const requested = args.trim().toLowerCase()
+      if (requested && !["on", "off", "status"].includes(requested)) {
+        ctx.ui.notify("Usage: /cursor.fast [on|off|status]", "warning")
         return
       }
       const model = modelOf(ctx)
@@ -121,6 +121,7 @@ export function registerCursorFast(pi: ExtensionAPI) {
         ctx.ui.notify("Select a Cursor model with /model before using /cursor.fast.", "warning")
         return
       }
+      const action = requested || (enabled.has(model.id) ? "off" : "on")
       if (action !== "status" && !ctx.isIdle()) {
         ctx.ui.notify("Wait for the current response to finish before changing Cursor fast mode.", "warning")
         return

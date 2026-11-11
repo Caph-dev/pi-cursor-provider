@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- `/cursor.fast` with no argument toggles the current model between off and on. `/cursor.fast on`, `/cursor.fast off`, and `/cursor.fast status` are unchanged.
+
 ## 0.6.0
 
 - A merged (unified) subscription now offers only the models its included weekly allowance covers. `GetPlanInfo`'s `isMerged` decides whether the filter runs; the current period's `autoBucketModels` names the ids that allowance pays for, and an entry is offered when the id a Run at its default parameters resolves to is one of them. The filter is applied when the catalogue is read, not to the catalogue itself: the stored list stays complete, request resolution keeps every variant, and `{ "showAllModels": true }` in `cursor.json` offers everything again without a refresh and without the plan lookups. Cursor's own plans filter nothing, and a plan or period report that cannot be read filters nothing either. Checked against a live X unified account: 6 of 65 entries stayed (auto, Grok 4.7 at two context sizes, Grok 4.6, Grok 4.5, Composer 2.5); two of the excluded ones were sampled and both were refused with `429 … is not included in your weekly usage`, and the rest were not each exercised. A refresh makes one more request (`GetPlanInfo`), and a second one (`GetCurrentPeriodUsage`) only on a merged plan.

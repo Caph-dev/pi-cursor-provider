@@ -119,6 +119,43 @@ test("catalogue changes immediately mark an enabled mode unavailable and block i
   assert.match(result.errorMessage!, /fast is enabled but unavailable/)
 })
 
+test("a bare command toggles the current model while status only reports it", async () => {
+  const { models } = await catalogue()
+  const h = harness(models)
+  await h.emit("session_start")
+  await h.command("")
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: on")
+  assert.deepEqual(h.saved().at(-1).data, { model: models[0].id, enabled: true })
+  await h.command("   ")
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: off")
+  assert.deepEqual(h.saved().at(-1).data, { model: models[0].id, enabled: false })
+  const saved = h.saved().length
+  await h.command("status")
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: off")
+  assert.equal(h.saved().length, saved)
+
+  h.setIdle(false)
+  await h.command("")
+  assert.match(h.notices.at(-1)!, /Wait/)
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: off")
+  h.setIdle(true)
+
+  h.setModel(models[1])
+  await h.emit("model_select")
+  await h.command("")
+  assert.match(h.notices.at(-1)!, /unavailable/)
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: unavailable")
+  h.setLevel("low")
+  await h.emit("thinking_level_select")
+  await h.command("")
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: on")
+  h.setLevel("high")
+  await h.emit("thinking_level_select")
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: on (unavailable)")
+  await h.command("")
+  assert.equal(h.statuses.get("cursor-fast"), "Cursor fast: unavailable")
+})
+
 test("command preserves model/thinking and validates arguments, availability, and busy state", async () => {
   const { models } = await catalogue()
   const h = harness(models)
