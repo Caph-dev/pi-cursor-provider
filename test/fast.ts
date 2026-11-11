@@ -1,19 +1,35 @@
 import assert from "node:assert/strict"
-import { afterEach, test } from "node:test"
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, afterEach, test } from "node:test"
 import { normalizeContext } from "@earendil-works/pi-ai"
 import type { Model } from "@earendil-works/pi-ai"
 import { registerCursorFast } from "../src/fast.ts"
+import { canonicalCwd, fastMemoryPath, readFastMemory, writeFastDirectory } from "../src/fast-memory.ts"
 import { piModelConfigs, supportsFast, usable } from "../src/models.ts"
 import { nativeSessions, runAnswer } from "../src/run.ts"
 
 const realFetch = globalThis.fetch
 const realToken = process.env.CURSOR_ACCESS_TOKEN
+const root = mkdtempSync(join(tmpdir(), "cursor-fast-"))
+const realAgentDir = process.env.PI_CODING_AGENT_DIR
+const configDir = mkdtempSync(join(root, "config-"))
+process.env.PI_CODING_AGENT_DIR = configDir
 let serial = 0
+
+after(() => {
+  if (realAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = realAgentDir
+  rmSync(root, { recursive: true, force: true })
+})
 
 afterEach(async () => {
   globalThis.fetch = realFetch
   if (realToken === undefined) delete process.env.CURSOR_ACCESS_TOKEN
   else process.env.CURSOR_ACCESS_TOKEN = realToken
+  process.env.PI_CODING_AGENT_DIR = configDir
+  rmSync(join(configDir, "cursor-fast.json"), { force: true })
   await nativeSessions.clear()
 })
 
@@ -52,6 +68,7 @@ function harness(models: Model<any>[]) {
   let level = "high"
   let idle = true
   let session = "fast-session"
+  let cwd = mkdtempSync(join(root, "session-"))
   let entries: any[] = []
   const notices: string[] = []
   const statuses = new Map<string, string | undefined>()
@@ -66,7 +83,7 @@ function harness(models: Model<any>[]) {
   const ctx = {
     get model() { return model },
     modelRegistry: { find: (_provider: string, id: string) => models.find((m) => m.id === id) },
-    sessionManager: { getSessionId: () => session, getBranch: () => entries },
+    sessionManager: { getSessionId: () => session, getBranch: () => entries, getCwd: () => cwd },
     isIdle: () => idle,
     ui: { notify: (message: string) => notices.push(message), setStatus: (key: string, text: string | undefined) => statuses.set(key, text) },
   }
@@ -80,6 +97,7 @@ function harness(models: Model<any>[]) {
     setIdle: (next: boolean) => { idle = next },
     branch: (next: any[]) => { entries = next },
     newSession: () => { session = "other-session"; entries = [] },
+    setCwd: (next: string) => { cwd = next },
     saved: () => entries,
   }
 }
@@ -193,6 +211,126 @@ test("command preserves model/thinking and validates arguments, availability, an
   assert.match(h.notices.at(-1)!, /Select a Cursor/)
 })
 
+test("a new session in the same directory inherits fast, and a branch that chose does not", async () => {
+  const { models } = await catalogue()
+  const project = join(configDir, "project")
+  const linked = join(configDir, "linked")
+  mkdirSync(project)
+  symlinkSync(project, linked)
+  const h = harness(models)
+  h.setCwd(project)
+  await h.emit("session_start")
+  await h.command("on")
+  const key = canonicalCwd(project)
+  if (!key) assert.fail("project has no canonical path")
+  assert.deepEqual(readFastMemory().get(key), [models[0].id])
+
+  h.newSession()
+  h.setCwd(linked)
+  await h.emit("session_start")
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
+  assert.equal(h.saved().length, 0)
+
+  h.setModel(models[1]); h.setLevel("low")
+  await h.emit("model_select")
+  await h.command("on")
+  h.setModel(models[0]); h.setLevel("high")
+  await h.emit("model_select")
+  assert.deepEqual(readFastMemory().get(key), [models[0].id, models[1].id])
+
+  await h.command("off")
+  assert.deepEqual(readFastMemory().get(key), [models[1].id])
+  const chosen = h.saved()
+  h.setModel(models[1]); h.setLevel("low")
+  h.branch([])
+  await h.emit("session_tree")
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
+  h.branch(chosen)
+  await h.emit("session_tree")
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
+  h.setModel(models[0]); h.setLevel("high")
+  await h.emit("model_select")
+  assert.equal(h.statuses.get("cursor-fast"), undefined)
+
+  h.setCwd(join(configDir, "other"))
+  h.newSession()
+  await h.emit("session_start")
+  assert.equal(h.statuses.get("cursor-fast"), undefined)
+})
+
+test("the first change on a branch keeps the models it inherited", async () => {
+  const { models } = await catalogue()
+  const dir = mkdtempSync(join(root, "inherit-"))
+  const h = harness(models)
+  h.setCwd(dir)
+  await h.emit("session_start")
+  await h.command("on")
+  h.setModel(models[1]); h.setLevel("low")
+  await h.command("on")
+  await h.command("off")
+
+  const next = harness(models)
+  next.setCwd(dir)
+  await next.emit("session_start")
+  assert.equal(next.statuses.get("cursor-fast"), "Fast")
+  next.setModel(models[1]); next.setLevel("low")
+  await next.emit("model_select")
+  await next.command("on")
+  assert.deepEqual(next.saved().map((entry) => entry.data), [
+    { model: models[0].id, enabled: true },
+    { model: models[1].id, enabled: true },
+  ])
+
+  const reloaded = harness(models)
+  reloaded.branch(next.saved())
+  reloaded.setCwd(dir)
+  await reloaded.emit("session_start")
+  assert.equal(reloaded.statuses.get("cursor-fast"), "Fast")
+  reloaded.setModel(models[1]); reloaded.setLevel("low")
+  await reloaded.emit("model_select")
+  assert.equal(reloaded.statuses.get("cursor-fast"), "Fast")
+})
+
+test("a branch that turned fast off stays off after the directory is turned on again", async () => {
+  const { models } = await catalogue()
+  const dir = mkdtempSync(join(root, "branch-"))
+  const h = harness(models)
+  h.setCwd(dir)
+  await h.emit("session_start")
+  await h.command("on")
+  await h.command("off")
+  const turnedOff = h.saved()
+
+  const later = harness(models)
+  later.setCwd(dir)
+  await later.emit("session_start")
+  await later.command("on")
+  assert.equal(later.statuses.get("cursor-fast"), "Fast")
+
+  h.branch(turnedOff)
+  await h.emit("session_tree")
+  assert.equal(h.statuses.get("cursor-fast"), undefined)
+})
+
+test("a failed directory write keeps the session change and says it was not saved", async () => {
+  const { models } = await catalogue()
+  const blocked = join(configDir, "not-a-directory")
+  writeFileSync(blocked, "file")
+  const previous = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = blocked
+  try {
+    const h = harness(models)
+    await h.emit("session_start")
+    await h.command("on")
+    assert.equal(h.statuses.get("cursor-fast"), "Fast")
+    assert.match(h.notices.at(-2)!, /could not be saved/)
+    assert.deepEqual(h.saved().at(-1).data, { model: models[0].id, enabled: true })
+  } finally {
+    if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = previous
+  }
+})
+
 test("preferences are model-specific, survive reload, and follow session branches", async () => {
   const { models } = await catalogue()
   const h = harness(models)
@@ -212,10 +350,14 @@ test("preferences are model-specific, survive reload, and follow session branche
   assert.equal(h.statuses.get("cursor-fast"), "Fast")
   h.branch([])
   await h.emit("session_tree")
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
+  await h.command("off")
+  const turnedOff = h.saved()
+  h.branch([])
+  await h.emit("session_tree")
   assert.equal(h.statuses.get("cursor-fast"), undefined)
-  await h.command("on")
-  h.newSession()
-  await h.emit("session_start")
+  h.branch(turnedOff)
+  await h.emit("session_tree")
   assert.equal(h.statuses.get("cursor-fast"), undefined)
 })
 

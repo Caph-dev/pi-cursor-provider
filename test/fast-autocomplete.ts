@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, test } from "node:test"
 import { getSelectListTheme, initTheme } from "@earendil-works/pi-coding-agent"
 import { CombinedAutocompleteProvider, Editor, stripTerminalSequences } from "@earendil-works/pi-tui"
 import type { AutocompleteProvider } from "@earendil-works/pi-tui"
@@ -7,8 +10,18 @@ import type { RegisteredCommand } from "@earendil-works/pi-coding-agent"
 import { registerCursorFast } from "../src/fast.ts"
 import { cursorFastAutocomplete } from "../src/fast-autocomplete.ts"
 
+const root = mkdtempSync(join(tmpdir(), "cursor-fast-complete-"))
+const realAgentDir = process.env.PI_CODING_AGENT_DIR
+process.env.PI_CODING_AGENT_DIR = root
+after(() => {
+  if (realAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = realAgentDir
+  rmSync(root, { recursive: true, force: true })
+})
+
 function fixture() {
   initTheme("dark", false)
+  const cwd = mkdtempSync(join(root, "session-"))
   let registered!: RegisteredCommand
   let provider!: AutocompleteProvider
   let installs = 0
@@ -21,7 +34,7 @@ function fixture() {
   provider = new CombinedAutocompleteProvider([{ ...registered, name: "cursor.fast" }], process.cwd())
   const ctx = {
     mode: "tui",
-    sessionManager: { getSessionId: () => "autocomplete-session", getBranch: () => [] },
+    sessionManager: { getSessionId: () => "autocomplete-session", getBranch: () => [], getCwd: () => cwd },
     ui: {
       setStatus: () => {},
       addAutocompleteProvider: (factory: (current: AutocompleteProvider) => AutocompleteProvider) => { provider = factory(provider); installs++ },

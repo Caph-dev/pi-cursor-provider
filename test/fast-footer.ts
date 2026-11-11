@@ -1,11 +1,28 @@
 import assert from "node:assert/strict"
-import { test } from "node:test"
+import { mkdtempSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { after, beforeEach, test } from "node:test"
 import { initTheme } from "@earendil-works/pi-coding-agent"
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui"
 import { registerCursorFast } from "../src/fast.ts"
 
+const root = mkdtempSync(join(tmpdir(), "cursor-fast-footer-"))
+const realAgentDir = process.env.PI_CODING_AGENT_DIR
+let configDir = ""
+beforeEach(() => {
+  configDir = mkdtempSync(join(root, "config-"))
+  process.env.PI_CODING_AGENT_DIR = configDir
+})
+after(() => {
+  if (realAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR
+  else process.env.PI_CODING_AGENT_DIR = realAgentDir
+  rmSync(root, { recursive: true, force: true })
+})
+
 function fixture() {
   initTheme("dark", false)
+  const cwd = join(configDir, "项目")
   let model: any = { provider: "cursor", id: "grok-test@500k", reasoning: true, contextWindow: 500_000, cursorFastLevels: ["high"] }
   let autoCompact = false
   let subscription = true
@@ -31,7 +48,7 @@ function fixture() {
       getBranch: () => entries,
       getEntries: () => [...entries],
       getLeafId: () => String(entries.length),
-      getCwd: () => "/tmp/项目",
+      getCwd: () => cwd,
       getSessionName: () => "Footer test",
     },
     isIdle: () => true,

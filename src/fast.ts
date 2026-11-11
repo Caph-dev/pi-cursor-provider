@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { streamCursor } from "./pi-stream.ts"
 import { createFastFooter, supportsInlineFastFooter } from "./fast-footer.ts"
 import { cursorFastAutocomplete } from "./fast-autocomplete.ts"
+import { canonicalCwd, readFastMemory, writeFastDirectory } from "./fast-memory.ts"
 
 const ENTRY = "cursor-fast"
 const STATUS = "cursor-fast"
@@ -76,15 +77,38 @@ export function registerCursorFast(pi: ExtensionAPI) {
     display(ctx, supported(model, pi.getThinkingLevel()) ? "Fast" : "Fast unavailable")
   }
 
+  // A branch that already chose is left alone, including a branch that turned
+  // fast off. Only a session with no choice of its own inherits the directory.
+  function directoryOf(ctx: ExtensionContext): string | undefined {
+    const cwd = ctx.sessionManager.getCwd?.()
+    return typeof cwd === "string" ? canonicalCwd(cwd) : undefined
+  }
+
+  function chosen(ctx: ExtensionContext): Array<{ model: string; enabled: boolean }> {
+    return ctx.sessionManager.getBranch().flatMap((entry) => {
+      if (entry.type !== "custom" || entry.customType !== ENTRY) return []
+      const data = entry.data as { model?: unknown; enabled?: unknown } | undefined
+      return typeof data?.model === "string" && typeof data.enabled === "boolean" ? [{ model: data.model, enabled: data.enabled }] : []
+    })
+  }
+
+  function remember(ctx: ExtensionContext): boolean {
+    const cwd = directoryOf(ctx)
+    return cwd ? writeFastDirectory(cwd, enabled) : true
+  }
+
   function restore(ctx: ExtensionContext) {
     enabled.clear()
     sessionId = ctx.sessionManager.getSessionId()
-    for (const entry of ctx.sessionManager.getBranch()) {
-      if (entry.type !== "custom" || entry.customType !== ENTRY) continue
-      const data = entry.data as { model?: unknown; enabled?: unknown } | undefined
-      if (typeof data?.model !== "string" || typeof data.enabled !== "boolean") continue
-      if (data.enabled) enabled.add(data.model)
-      else enabled.delete(data.model)
+    const entries = chosen(ctx)
+    if (entries.length) {
+      for (const entry of entries) {
+        if (entry.enabled) enabled.add(entry.model)
+        else enabled.delete(entry.model)
+      }
+    } else {
+      const cwd = directoryOf(ctx)
+      for (const model of (cwd ? readFastMemory().get(cwd) : undefined) ?? []) enabled.add(model)
     }
     updateStatus(ctx)
   }
@@ -136,9 +160,19 @@ export function registerCursorFast(pi: ExtensionAPI) {
       }
       if (action !== "status") {
         const on = action === "on"
+        // The first choice on a branch has to carry the models it inherited.
+        // Recording only the model just changed would drop the others on reload.
+        if (!chosen(ctx).length) {
+          for (const id of enabled) {
+            if (id !== model.id) pi.appendEntry(ENTRY, { model: id, enabled: true })
+          }
+        }
         pi.appendEntry(ENTRY, { model: model.id, enabled: on })
         if (on) enabled.add(model.id)
         else enabled.delete(model.id)
+        if (!remember(ctx)) {
+          ctx.ui.notify("Cursor fast changed for this session, but the directory preference could not be saved.", "warning")
+        }
       }
       updateStatus(ctx)
       const on = enabled.has(model.id)
