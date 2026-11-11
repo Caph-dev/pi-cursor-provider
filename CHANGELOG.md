@@ -2,8 +2,11 @@
 
 ## Unreleased
 
+## 0.7.0
+
 - `/cursor.fast` with no argument toggles the current model between off and on. `/cursor.fast on`, `/cursor.fast off`, and `/cursor.fast status` are unchanged.
 - Fast stays off the footer while it is off or unavailable. Enabling it publishes `Fast`; an enabled preference that the current thinking level no longer supports publishes `Fast unavailable`. Non-Cursor models still publish nothing.
+- Each assistant stream event carries `cursorOutputTiming`, copied when the event is queued. The shared partial stays the one live message, so a consumer that reads the queue later still sees the reading from that moment: estimated output tokens, elapsed time, and a receive-side tokens-per-second once a measured interval exists. Bytes that open a burst, including the first delta after a tool call, are not in the rate. Cursor's own output count arrives with the stop and replaces the estimate only when it is measured. Replayed native events are marked and do not move the clock.
 
 ## 0.6.0
 
