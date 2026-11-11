@@ -241,16 +241,15 @@ test("a new session in the same directory inherits fast, and a branch that chose
   await h.command("off")
   assert.deepEqual(readFastMemory().get(key), [models[1].id])
   const chosen = h.saved()
-  h.setModel(models[1]); h.setLevel("low")
   h.branch([])
   await h.emit("session_tree")
+  assert.equal(h.statuses.get("cursor-fast"), undefined)
+  h.setModel(models[1]); h.setLevel("low")
+  await h.emit("model_select")
   assert.equal(h.statuses.get("cursor-fast"), "Fast")
   h.branch(chosen)
   await h.emit("session_tree")
   assert.equal(h.statuses.get("cursor-fast"), "Fast")
-  h.setModel(models[0]); h.setLevel("high")
-  await h.emit("model_select")
-  assert.equal(h.statuses.get("cursor-fast"), undefined)
 
   h.setCwd(join(configDir, "other"))
   h.newSession()
@@ -270,11 +269,10 @@ test("the first change on a branch keeps the models it inherited", async () => {
   await h.command("off")
 
   const next = harness(models)
+  next.setModel(models[1]); next.setLevel("low")
   next.setCwd(dir)
   await next.emit("session_start")
-  assert.equal(next.statuses.get("cursor-fast"), "Fast")
-  next.setModel(models[1]); next.setLevel("low")
-  await next.emit("model_select")
+  assert.equal(next.statuses.get("cursor-fast"), undefined)
   await next.command("on")
   assert.deepEqual(next.saved().map((entry) => entry.data), [
     { model: models[0].id, enabled: true },
@@ -331,6 +329,47 @@ test("a failed directory write keeps the session change and says it was not save
   }
 })
 
+test("selecting another model carries fast when that model supports it", async () => {
+  const { models } = await catalogue()
+  const h = harness(models)
+  await h.emit("session_start")
+  await h.command("on")
+
+  h.setLevel("high")
+  h.setModel(models[1])
+  await h.emit("model_select")
+  assert.equal(h.statuses.get("cursor-fast"), undefined)
+  assert.deepEqual(h.saved().map((entry) => entry.data), [{ model: models[0].id, enabled: true }])
+
+  h.setModel(models[0])
+  await h.emit("model_select")
+  h.setIdle(false)
+  h.setModel(models[1]); h.setLevel("low")
+  await h.emit("model_select")
+  assert.equal(h.statuses.get("cursor-fast"), undefined)
+  h.setIdle(true)
+  h.setModel(models[0]); h.setLevel("high")
+  await h.emit("model_select")
+
+  h.setModel(models[1]); h.setLevel("low")
+  await h.emit("model_select")
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
+  const key = canonicalCwd(h.ctx.sessionManager.getCwd())
+  if (!key) assert.fail("session has no canonical path")
+  assert.deepEqual(readFastMemory().get(key), [models[0].id, models[1].id])
+
+  const resumed = harness(models)
+  resumed.branch(h.saved())
+  resumed.setModel(models[1]); resumed.setLevel("low")
+  await resumed.emit("session_start")
+  assert.equal(resumed.statuses.get("cursor-fast"), "Fast")
+
+  await h.command("off")
+  h.setModel(models[0]); h.setLevel("high")
+  await h.emit("model_select")
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
+})
+
 test("preferences are model-specific, survive reload, and follow session branches", async () => {
   const { models } = await catalogue()
   const h = harness(models)
@@ -344,7 +383,7 @@ test("preferences are model-specific, survive reload, and follow session branche
   assert.equal(resumed.statuses.get("cursor-fast"), "Fast")
   h.setModel(models[1]); h.setLevel("low")
   await h.emit("model_select")
-  assert.equal(h.statuses.get("cursor-fast"), undefined)
+  assert.equal(h.statuses.get("cursor-fast"), "Fast")
   h.setModel(models[0]); h.setLevel("high")
   await h.emit("model_select")
   assert.equal(h.statuses.get("cursor-fast"), "Fast")

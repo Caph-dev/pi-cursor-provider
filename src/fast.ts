@@ -12,6 +12,7 @@ type FastModel = Model<any> & { cursorFastLevels?: string[] }
 
 export function registerCursorFast(pi: ExtensionAPI) {
   const enabled = new Set<string>()
+  let activeModel: string | undefined
   let sessionId: string | undefined
   let currentContext: ExtensionContext | undefined
   let badge = ""
@@ -97,6 +98,30 @@ export function registerCursorFast(pi: ExtensionAPI) {
     return cwd ? writeFastDirectory(cwd, enabled) : true
   }
 
+  function record(ctx: ExtensionContext, model: string, on: boolean): boolean {
+    if (!chosen(ctx).length) {
+      for (const id of enabled) {
+        if (id !== model) pi.appendEntry(ENTRY, { model: id, enabled: true })
+      }
+    }
+    pi.appendEntry(ENTRY, { model, enabled: on })
+    if (on) enabled.add(model)
+    else enabled.delete(model)
+    return remember(ctx)
+  }
+
+  function carry(ctx: ExtensionContext) {
+    const next = modelOf(ctx)
+    const previous = activeModel
+    if (next) activeModel = next.id
+    if (!next || !previous || previous === next.id || !enabled.has(previous)) return
+    if (!ctx.isIdle()) return
+    if (enabled.has(next.id) || !supported(next, pi.getThinkingLevel())) return
+    if (!record(ctx, next.id, true)) {
+      ctx.ui.notify("Cursor fast followed the model, but the directory preference could not be saved.", "warning")
+    }
+  }
+
   function restore(ctx: ExtensionContext) {
     enabled.clear()
     sessionId = ctx.sessionManager.getSessionId()
@@ -111,6 +136,7 @@ export function registerCursorFast(pi: ExtensionAPI) {
       for (const model of (cwd ? readFastMemory().get(cwd) : undefined) ?? []) enabled.add(model)
     }
     updateStatus(ctx)
+    activeModel = modelOf(ctx)?.id
   }
 
   pi.on("session_start", (_event, ctx) => {
@@ -129,7 +155,7 @@ export function registerCursorFast(pi: ExtensionAPI) {
     autocompleteInstalled = false
     enabled.clear()
   })
-  pi.on("model_select", (_event, ctx) => updateStatus(ctx))
+  pi.on("model_select", (_event, ctx) => { carry(ctx); updateStatus(ctx) })
   pi.on("thinking_level_select", (_event, ctx) => updateStatus(ctx))
   pi.on("before_agent_start", (_event, ctx) => updateStatus(ctx))
 
@@ -162,15 +188,7 @@ export function registerCursorFast(pi: ExtensionAPI) {
         const on = action === "on"
         // The first choice on a branch has to carry the models it inherited.
         // Recording only the model just changed would drop the others on reload.
-        if (!chosen(ctx).length) {
-          for (const id of enabled) {
-            if (id !== model.id) pi.appendEntry(ENTRY, { model: id, enabled: true })
-          }
-        }
-        pi.appendEntry(ENTRY, { model: model.id, enabled: on })
-        if (on) enabled.add(model.id)
-        else enabled.delete(model.id)
-        if (!remember(ctx)) {
+        if (!record(ctx, model.id, on)) {
           ctx.ui.notify("Cursor fast changed for this session, but the directory preference could not be saved.", "warning")
         }
       }

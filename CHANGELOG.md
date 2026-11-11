@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+## 0.8.0
+
+- Selecting another Cursor model while fast is on carries it to that model when the response is finished and the model supports fast at the current thinking level. The previous model stays on. A busy response, a model without support, or a model that is already on does not record another change. Turning it off does not turn off the model being left.
 - `/cursor.fast` now remembers the models left on for the session's working directory. The record is `cursor-fast.json` beside `cursor.json`, separate from that hand-edited file. A new session in the same directory inherits it. The first change on a branch records the inherited models too, so a reload keeps them. A branch that already chose, including one that turned fast off, keeps its own choice. A different directory, and a directory change inside an existing session, do not move the switch. A failed write still changes the current session and says the directory preference was not saved.
 
 ## 0.7.1
