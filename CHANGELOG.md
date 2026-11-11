@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `/cursor.fast` with no argument toggles the current model between off and on. `/cursor.fast on`, `/cursor.fast off`, and `/cursor.fast status` are unchanged.
+- Fast stays off the footer while it is off or unavailable. Enabling it publishes `Fast`; an enabled preference that the current thinking level no longer supports publishes `Fast unavailable`. Non-Cursor models still publish nothing.
 
 ## 0.6.0
 

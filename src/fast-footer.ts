@@ -70,8 +70,8 @@ export function createFastFooter(
     render(width: number): string[] {
       footer.setAutoCompactEnabled(pi.getSettings().compaction?.enabled ?? true)
       const lines = footer.render(width)
-      const text = badge().replace(/^Cursor /, "")
-      const label = theme.fg(text === "fast: on" ? "accent" : "dim", text)
+      const text = badge()
+      const label = theme.fg(text === "Fast" ? "accent" : "warning", text)
       const suffix = ` • ${label}`
       const reserved = visibleWidth(suffix)
       lines[1] = width <= reserved

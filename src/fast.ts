@@ -70,8 +70,10 @@ export function registerCursorFast(pi: ExtensionAPI) {
       return
     }
     const on = enabled.has(model.id)
-    const available = supported(model, pi.getThinkingLevel())
-    display(ctx, available ? `Cursor fast: ${on ? "on" : "off"}` : `Cursor fast: ${on ? "on (unavailable)" : "unavailable"}`)
+    // Off is the default, so it stays off the footer. Only an enabled preference
+    // earns the row; an unsupported thinking level keeps it visible as a warning.
+    if (!on) { display(ctx, undefined); return }
+    display(ctx, supported(model, pi.getThinkingLevel()) ? "Fast" : "Fast unavailable")
   }
 
   function restore(ctx: ExtensionContext) {
