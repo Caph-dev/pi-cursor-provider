@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+## 0.7.1
+
+- Republished after npm staged 0.7.0 without making it installable.
+
 ## 0.7.0
 
 - `/cursor.fast` with no argument toggles the current model between off and on. `/cursor.fast on`, `/cursor.fast off`, and `/cursor.fast status` are unchanged.
