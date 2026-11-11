@@ -128,6 +128,29 @@ test("a step that owed nothing has no magpie_deferred", async () => {
   assert.equal(u.magpie_deferred, undefined)
 })
 
+test("output source distinguishes dashboard usage, absent usage, and turn-ended fields", async () => {
+  const options = { send() {}, blobs: new Map(), tools }
+  const collect = async (frames: Parameters<typeof decode>[0], extra: Parameters<typeof decode>[1] = options) => {
+    const events = []
+    for await (const event of decode(frames, extra)) events.push(event)
+    return events.at(-1)?.usage
+  }
+  const measured = await collect([listed, call], { ...options, stepUsage: async () => ({ input: 1, output: 23, cacheRead: 0, cacheWrite: 0, reasoning: 0 }) })
+  assert.equal(measured?.cursor_output_source, "measured")
+  assert.equal(measured?.completion_tokens, 23)
+  const unavailable = await collect([listed, call], { ...options, stepUsage: async () => false })
+  assert.equal(unavailable?.cursor_output_source, "unavailable")
+  const content = update(1, pb().str(1, "hello").done())
+  const missing = await collect([content, update(14, pb().varint(1, 9).done())])
+  assert.equal(missing?.cursor_output_source, "unavailable")
+  const ended = await collect([content, update(14, pb().varint(2, 13).done())])
+  assert.equal(ended?.cursor_output_source, "measured")
+  assert.equal(ended?.completion_tokens, 13)
+  const zero = await collect([content, update(14, pb().varint(2, 0).done())])
+  assert.equal(zero?.cursor_output_source, "measured")
+  assert.equal(zero?.completion_tokens, 0)
+})
+
 test("clearLedger empties owed and misses", () => {
   owed.set("x", { since: Date.now(), n: 1, ready: Date.now(), carry: null })
   misses.set("y", 2)

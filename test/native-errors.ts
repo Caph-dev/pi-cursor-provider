@@ -170,8 +170,10 @@ test("prepare never submits a batch twice and replays only its delivered answer"
   owner.delivered()
   assert.deepEqual(prepare(pool, [...opening, asked(ids), result(ids[0], "changed")]), { fallback: "result already submitted or busy" })
   const replayed = owner.resume(prepare(pool, answered(ids)), undefined).events
-  assert.deepEqual((await replayed.next()).value, { text: "answer" })
-  assert.equal((await replayed.next()).value.usage.magpie_native.accounting, "replayed")
+  assert.deepEqual((await replayed.next()).value, { text: "answer", replay: true })
+  const terminal = (await replayed.next()).value
+  assert.equal(terminal.usage.magpie_native.accounting, "replayed")
+  assert.equal(terminal.usage.cursor_output_source, "replayed")
   assert.equal(writes.length, sent)
 })
 

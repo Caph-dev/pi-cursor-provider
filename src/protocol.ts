@@ -37,6 +37,7 @@ export type RunUsage = {
   /** Earlier steps' usage collected with this one. It is not this step's context size. */
   magpie_deferred?: { prompt_tokens: number; completion_tokens: number; cached_tokens: number; cache_write_tokens: number }
   magpie_native?: { accounting: "pending" | "estimated" | "replayed" }
+  cursor_output_source?: "measured" | "estimated" | "allocated" | "pending" | "replayed" | "unavailable"
 }
 
 /** What a Run streams to the caller. Each event sets one of text, reasoning, tool, stop, or error. */
@@ -355,8 +356,12 @@ export async function* decode(
   let wrote = 0
   let usage: UsageCounts = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0 }
   let counted = false
+  let outputSource: RunUsage["cursor_output_source"] = "unavailable"
   const finish = (more: UsageCounts | null) => {
-    if (!counted && !usage.output) usage.output = Math.floor((said + 3) / 4)
+    if (!counted && !usage.output) {
+      usage.output = Math.floor((said + 3) / 4)
+      outputSource = "estimated"
+    }
     if (!counted && !usage.input && !usage.cacheRead && !usage.cacheWrite) usage.input = estimate
     const prompt = usage.input + usage.cacheRead + usage.cacheWrite
     const deferred = more && more.input + more.output + more.cacheRead + more.cacheWrite > 0
@@ -365,6 +370,7 @@ export async function* decode(
       usage: {
         prompt_tokens: prompt,
         completion_tokens: usage.output,
+        cursor_output_source: outputSource,
         total_tokens: prompt + usage.output,
         prompt_tokens_details: { cached_tokens: usage.cacheRead, cache_write_tokens: usage.cacheWrite },
         ...(usage.reasoning ? { completion_tokens_details: { reasoning_tokens: usage.reasoning } } : {}),
@@ -385,7 +391,10 @@ export async function* decode(
     if (calls > 0 && !ended && stepUsage) {
       close?.()
       const u = await stepUsage().catch(() => null)
-      if (u) usage = u
+      if (u) {
+        usage = u
+        outputSource = "measured"
+      }
       counted = u === false || !!u
     } else if (calls > 0) {
       close?.()
@@ -455,6 +464,7 @@ export async function* decode(
                 }
                 case 14: // turn ended, with what it used
                   usage = usageOf(uf)
+                  outputSource = uf.some((field) => field.num === 2) ? "measured" : "unavailable"
                   ended = true
                   counted = true
                   if (calls === 0) {

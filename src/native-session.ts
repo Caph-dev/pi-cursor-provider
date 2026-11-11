@@ -334,12 +334,13 @@ class Segment {
         }
         if (at < segment.events.length) {
           const event = segment.events[at++]
-          if (replay && event.stop) return { value: { ...event, usage: {
+          if (replay && event.stop) return { value: { ...event, replay: true, usage: {
             prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+            cursor_output_source: "replayed",
             prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
             magpie_native: { accounting: "replayed" },
           } }, done: false }
-          return { value: event, done: false }
+          return { value: replay ? { ...event, replay: true } : event, done: false }
         }
         return { done: true }
       },
@@ -758,6 +759,7 @@ class NativeSession {
     for (const c of segment.calls) this.pool.handles.set(c.id, { owner: this, batch: segment })
     segment.finish({ stop: "tool_calls", usage: {
       prompt_tokens: 0, completion_tokens: 0, total_tokens: 0,
+      cursor_output_source: "pending",
       prompt_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
       magpie_native: { accounting: "pending" },
     } })
@@ -872,6 +874,7 @@ class NativeSession {
     const prompt = u.input + u.cacheRead + u.cacheWrite
     this.finalUsage = {
       prompt_tokens: prompt, completion_tokens: u.output, total_tokens: prompt + u.output,
+      cursor_output_source: !measuredOutput ? "estimated" : this.steps > 1 ? "allocated" : "measured",
       prompt_tokens_details: { cached_tokens: u.cacheRead, cache_write_tokens: u.cacheWrite },
       ...(this.usageFields?.some((f) => f.num === 5) ? { completion_tokens_details: { reasoning_tokens: u.reasoning } } : {}),
       ...(!measuredInput || !measuredOutput ? { magpie_native: { accounting: "estimated" } } : {}),

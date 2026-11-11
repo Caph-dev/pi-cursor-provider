@@ -38,10 +38,25 @@ export interface CursorStreamOptions extends SimpleStreamOptions {
 /** Shown when no Cursor credential is available. */
 export const CURSOR_NOT_SIGNED_IN = "Cursor isn't signed in. Run /login cursor or set CURSOR_ACCESS_TOKEN."
 
+export type CursorOutputTiming = {
+  outputTokens: number
+  source: "estimated" | "measured"
+  accountingSource?: "measured" | "estimated" | "allocated" | "pending" | "replayed" | "unavailable"
+  elapsedMs: number
+  /** Receive-side estimate after the first delta; absent without a measurable interval. */
+  tokensPerSecond?: number
+  tokensPerSecondSource?: "estimated"
+}
+
+type CursorMessage = AssistantMessage & { cursorOutputTiming?: CursorOutputTiming }
+
+type Timed<T> = T & { cursorOutputTiming?: CursorOutputTiming }
+
 type RunTool = { id: string; name: string; args: string }
 type RunUsage = {
   prompt_tokens?: number
   completion_tokens?: number
+  cursor_output_source?: CursorOutputTiming["accountingSource"]
   prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
   completion_tokens_details?: { reasoning_tokens?: number }
   /** Earlier steps' usage collected with this step; not applied to Pi context size. */
@@ -53,6 +68,7 @@ type RunUsage = {
   }
 }
 type RunEvent = {
+  replay?: boolean
   text?: string
   reasoning?: string
   tool?: RunTool
@@ -175,14 +191,45 @@ export async function emitCursorEvents(
   events: AsyncIterable<RunEvent>,
   options?: SimpleStreamOptions,
 ): Promise<void> {
-  const message = blank(model)
+  const message: CursorMessage = blank(model)
   if (options?.reasoning) message.thinkingLevel = options.reasoning
+  let streamingAt: number | undefined
+  let elapsedMs = 0
+  let outputBytes = 0
+  // Bytes that opened a burst have no interval of their own, so the rate counts only what arrived after one.
+  let rateBytes = 0
+  const updateTiming = (text: string) => {
+    const now = performance.now()
+    const size = Buffer.byteLength(text, "utf8")
+    if (streamingAt === undefined) {
+      streamingAt = now
+    } else {
+      elapsedMs += Math.max(0, now - streamingAt)
+      streamingAt = now
+      rateBytes += size
+    }
+    outputBytes += size
+    const rateTokens = rateBytes / 4
+    // A fresh object each time: the previous event still points at the last one.
+    message.cursorOutputTiming = {
+      outputTokens: Math.ceil(outputBytes / 4),
+      source: "estimated",
+      elapsedMs,
+      ...(elapsedMs > 0 && rateTokens > 0 ? { tokensPerSecond: rateTokens * 1000 / elapsedMs, tokensPerSecondSource: "estimated" as const } : {}),
+    }
+  }
+  const pauseTiming = () => {
+    streamingAt = undefined
+  }
   let finished = false
   let open: { kind: "text" | "thinking"; index: number } | null = null
 
   const push = (event: AssistantMessageEvent) => {
     if (finished) return
     if (event.type === "done" || event.type === "error") finished = true
+    // partial stays the one shared message. Its timing object is replaced as deltas arrive and the queue
+    // holds events until the consumer reads, so the reading for this event is copied onto the event itself.
+    if (message.cursorOutputTiming) (event as Timed<typeof event>).cursorOutputTiming = { ...message.cursorOutputTiming }
     stream.push(event)
   }
   const endOpen = () => {
@@ -217,6 +264,7 @@ export async function emitCursorEvents(
         return
       }
       if (event.text) {
+        if (!event.replay) updateTiming(event.text)
         if (open?.kind === "thinking") endOpen()
         if (!open) {
           message.content.push({ type: "text", text: "" })
@@ -228,6 +276,7 @@ export async function emitCursorEvents(
         push({ type: "text_delta", contentIndex: open.index, delta: event.text, partial: message })
       }
       if (event.reasoning) {
+        if (!event.replay) updateTiming(event.reasoning)
         if (open?.kind === "text") endOpen()
         if (!open) {
           message.content.push({ type: "thinking", thinking: "" })
@@ -239,6 +288,7 @@ export async function emitCursorEvents(
         push({ type: "thinking_delta", contentIndex: open.index, delta: event.reasoning, partial: message })
       }
       if (event.tool) {
+        pauseTiming()
         endOpen()
         sawTool = true
         const call: ToolCall = {
@@ -256,6 +306,15 @@ export async function emitCursorEvents(
       if (event.stop) {
         endOpen()
         applyUsage(message, model, event.usage)
+        if (message.cursorOutputTiming && event.usage?.cursor_output_source) {
+          const source = event.usage.cursor_output_source
+          const measured = source === "measured" && typeof event.usage.completion_tokens === "number"
+          message.cursorOutputTiming = {
+            ...message.cursorOutputTiming,
+            accountingSource: source,
+            ...(measured ? { source: "measured", outputTokens: event.usage.completion_tokens } : {}),
+          }
+        }
         const reason: Extract<StopReason, "stop" | "toolUse"> = sawTool || event.stop === "tool_calls" ? "toolUse" : "stop"
         message.stopReason = reason
         push({ type: "done", reason, message })
