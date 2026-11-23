@@ -120,11 +120,18 @@ function toolArguments(raw: string): ToolCall["arguments"] {
   return {}
 }
 
-function toChat(messages: TranscriptContext["messages"], system: string) {
+export function toChat(messages: TranscriptContext["messages"], system: string) {
   const out: Record<string, unknown>[] = []
+  const toolImages: Array<{ type: "image_url"; image_url: { url: string } }> = []
+  const flushToolImages = () => {
+    if (!toolImages.length) return
+    out.push({ role: "user", content: [{ type: "text", text: "Attached image(s) from tool result:" }, ...toolImages] })
+    toolImages.length = 0
+  }
   if (system) out.push({ role: "system", content: system })
   for (const message of messages) {
     if (message.role === "system") continue
+    if (message.role !== "toolResult") flushToolImages()
     if (message.role === "user") {
       if (typeof message.content === "string") {
         out.push({ role: "user", content: message.content })
@@ -153,7 +160,15 @@ function toChat(messages: TranscriptContext["messages"], system: string) {
       continue
     }
     if (message.role === "toolResult") {
-      const text = message.content.map((part) => (part.type === "text" ? part.text : "[image]")).join("")
+      const text = message.content.map((part) => {
+        if (part.type === "text") return part.text
+        if (part.type === "image") {
+          const url = part.data.startsWith("data:") ? part.data : `data:${part.mimeType};base64,${part.data}`
+          toolImages.push({ type: "image_url", image_url: { url } })
+          return "[image attached]"
+        }
+        return ""
+      }).join("")
       out.push({
         role: "tool",
         tool_call_id: message.toolCallId,
@@ -162,6 +177,7 @@ function toChat(messages: TranscriptContext["messages"], system: string) {
       })
     }
   }
+  flushToolImages()
   return out
 }
 

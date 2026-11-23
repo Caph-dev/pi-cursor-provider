@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Preserve images returned by Pi tools so Cursor models can see screenshots opened from a file path.
+
 ## 0.8.0
 
 - Selecting another Cursor model while fast is on carries it to that model when the response is finished and the model supports fast at the current thinking level. The previous model stays on. A busy response, a model without support, or a model that is already on does not record another change. Turning it off does not turn off the model being left.
